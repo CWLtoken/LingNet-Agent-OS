@@ -43,6 +43,7 @@ var g_common_pool: CommonPool = undefined;
 var g_quarantine_pool: QuarantinePool = undefined;
 var g_l2_pool: L2Pool = undefined;
 var g_stats: PoolStats = .{ .common_free = 0, .quarantine_pending = 0, .l2_free = 0, .total_sanitized = 0, .total_violations = 0 };
+var g_total_sanitized: std.atomic.Value(u64) = .{ .raw = 0 };
 var g_current_generation: std.atomic.Value(u64) = .{ .raw = 1 };
 
 /// Initialize all pools at daemon boot (called once from main.zig)
@@ -278,7 +279,7 @@ pub fn sanitizerThreadLoop(config: SanitizerConfig) void {
             block.flags = .{ .zeroed = true, .quarantined = false };
             g_l2_pool.push(block);
             processed += 1;
-            _ = @atomicRmw(u64, &g_stats.total_sanitized, .Add, 1, .monotonic);
+            g_total_sanitized.fetchAdd(1, .monotonic);
         }
 
         if (processed == 0) {
@@ -309,6 +310,7 @@ inline fn avx2ZeroBlock(ptr: [*]u8, len: usize) void {
                 :
                 : [p] "r" (ptr + i),
                   [mem] "m" (@as([*]volatile u8, ptr)),
+                : .{ .memory = true }
             );
         }
     }
@@ -335,7 +337,7 @@ pub fn getStats() PoolStats {
         .common_free = g_common_pool.count,
         .quarantine_pending = g_quarantine_pool.count,
         .l2_free = g_l2_pool.count,
-        .total_sanitized = g_stats.total_sanitized,
+        .total_sanitized = g_total_sanitized.load(.monotonic),
         .total_violations = g_stats.total_violations,
     };
 }
