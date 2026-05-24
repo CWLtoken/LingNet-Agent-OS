@@ -53,7 +53,7 @@ pub fn initPools(allocator: std.mem.Allocator, block_count: usize, block_size: u
         null,
         total_size,
         std.posix.PROT{ .READ = true, .WRITE = true },
-        std.posix.MAP{ .TYPE = .PRIVATE, .ANONYMOUS = true, .HUGETLB = true },
+        std.posix.MAP{ .TYPE = .PRIVATE, .ANONYMOUS = true },
         -1,
         0,
     );

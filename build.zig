@@ -64,6 +64,22 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(exe);
 
+    // === Benchmark Executable ===
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("bench_gqap.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_mod.addImport("arena-gqap", gqap_mod);
+    const bench_exe = b.addExecutable(.{
+        .name = "bench-gqap",
+        .root_module = bench_mod,
+    });
+    b.installArtifact(bench_exe);
+    const run_bench = b.addRunArtifact(bench_exe);
+    const bench_step = b.step("bench", "Run GQAP benchmarks");
+    bench_step.dependOn(&run_bench.step);
+
     // === Unit Tests: sdk_arena_gqap.zig ===
     const gqap_test = b.addTest(.{
         .root_module = gqap_mod,
