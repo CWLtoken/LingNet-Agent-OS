@@ -143,8 +143,9 @@ fn loadEbpfPrograms(cap: EbpfCapability) !void {
 
 fn loadBpfProgram(comptime import_name: []const u8, comptime filename: []const u8) !void {
     const bytecode = @embedFile(import_name);
-    // Call into tools/ebpf_loader.zig
-    try ebpfLoader.load(bytecode);
+    // Use @import to access ebpf loader comptime module
+    const ebpf_loader = @import("tools_ebpf_loader");
+    try ebpf_loader.load(bytecode);
     std.log.info("[BOOT] Loaded BPF program: {s}", .{filename});
 }
 
@@ -153,7 +154,8 @@ fn registerCgroupId() !void {
     const cgroup_id = try getCurrentCgroupId();
 
     // Write to lingnet_cgroup map (fd from loaded BPF)
-    const map_fd = try ebpfLoader.getMapFd("lingnet_cgroup");
+    const ebpf_loader = @import("tools_ebpf_loader");
+    const map_fd = try ebpf_loader.getMapFd("lingnet_cgroup");
 
     var key: u64 = cgroup_id;
     var value: u32 = 1;
@@ -176,6 +178,8 @@ fn registerCgroupId() !void {
 fn getCurrentCgroupId() !u64 {
     // On Linux 4.18+, /proc/self/cgroup contains cgroup v2 ID
     // Simplified: use getcpu or read cgroupfs
+    // TODO(M1): Read actual cgroup v2 ID from /proc/self/cgroup or
+    //   statx(STATX_INO) on cgroupfs. Hardcoded M0 placeholder.
     return 1; // Placeholder: actual implementation reads /proc/self/cgroup
 }
 
@@ -219,7 +223,7 @@ fn protectL0Segment() !void {
     const ret = std.os.linux.mprotect(
         l0_start,
         l0_size,
-        std.os.linux.PROT.READ | std.os.linux.PROT.EXEC,
+        @bitCast(std.os.linux.PROT{ .READ = true, .EXEC = true }),
     );
 
     if (ret != 0) {

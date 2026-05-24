@@ -49,11 +49,11 @@ pub const DynamicSkill = struct {
         }
 
         if (self.seccomp_fd >= 0) {
-            std.posix.close(self.seccomp_fd);
+            _ = std.os.linux.close(self.seccomp_fd);
         }
 
         if (self.landlock_fd >= 0) {
-            std.posix.close(self.landlock_fd);
+            _ = std.os.linux.close(self.landlock_fd);
         }
     }
 };
@@ -100,11 +100,11 @@ pub fn loadSkill(allocator: std.mem.Allocator, path: []const u8, manifest: Skill
 
     // [6] Install Seccomp-BPF filter
     const seccomp_fd = try installSeccompFilter();
-    errdefer std.posix.close(seccomp_fd);
+    errdefer _ = std.os.linux.close(seccomp_fd);
 
     // [7] Initialize Landlock sandbox
     const landlock_fd = try initLandlock();
-    errdefer std.posix.close(landlock_fd);
+    errdefer _ = std.os.linux.close(landlock_fd);
 
     // [8] dlopen the .so
     const handle = std.c.dlopen(path.ptr, std.c.RTLD.LAZY | std.c.RTLD.LOCAL);

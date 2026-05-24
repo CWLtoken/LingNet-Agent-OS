@@ -51,8 +51,8 @@ pub fn initPools(allocator: std.mem.Allocator, block_count: usize, block_size: u
     const backing = try std.posix.mmap(
         null,
         total_size,
-        std.posix.PROT.READ | std.posix.PROT.WRITE,
-        std.posix.MAP.PRIVATE | std.posix.MAP.ANONYMOUS | std.posix.MAP.HUGETLB,
+        std.posix.PROT{ .READ = true, .WRITE = true },
+        std.posix.MAP{ .TYPE = .PRIVATE, .ANONYMOUS = true, .HUGETLB = true },
         -1,
         0,
     );
@@ -282,12 +282,14 @@ pub fn sanitizerThreadLoop(config: SanitizerConfig) void {
         }
 
         if (processed == 0) {
-            std.posix.nanosleep(&.{ .tv_sec = 0, .tv_nsec = @intCast(config.wake_interval_ms * 1_000_000) }, null);
+            _ = std.os.linux.nanosleep(&.{ .tv_sec = 0, .tv_nsec = @intCast(config.wake_interval_ms * 1_000_000) }, null);
         }
     }
 }
 
 // AVX2 Optimized Zeroing (~20GB/s throughput, ~3us/64KB)
+// Note: Zig 0.17 asm syntax changed - no separate clobber section.
+// Memory clobber expressed via "+m" output constraint on dummy var.
 inline fn avx2ZeroBlock(ptr: [*]u8, len: usize) void {
     const block_len = std.mem.alignForward(usize, len, 32);
     var i: usize = 0;
@@ -295,18 +297,18 @@ inline fn avx2ZeroBlock(ptr: [*]u8, len: usize) void {
     if (builtin.cpu.arch == .x86_64 and comptime std.Target.x86.featureSetHas(builtin.cpu.features, .avx2)) {
         while (i + 256 <= block_len) : (i += 256) {
             asm volatile (
-                \ vpxor %%ymm0, %%ymm0, %%ymm0
-                \ vmovntdq %%ymm0, 0(%[p])
-                \ vmovntdq %%ymm0, 32(%[p])
-                \ vmovntdq %%ymm0, 64(%[p])
-                \ vmovntdq %%ymm0, 96(%[p])
-                \ vmovntdq %%ymm0, 128(%[p])
-                \ vmovntdq %%ymm0, 160(%[p])
-                \ vmovntdq %%ymm0, 192(%[p])
-                \ vmovntdq %%ymm0, 224(%[p])
+                \\ vpxor %%ymm0, %%ymm0, %%ymm0
+                \\ vmovntdq %%ymm0, 0(%[p])
+                \\ vmovntdq %%ymm0, 32(%[p])
+                \\ vmovntdq %%ymm0, 64(%[p])
+                \\ vmovntdq %%ymm0, 96(%[p])
+                \\ vmovntdq %%ymm0, 128(%[p])
+                \\ vmovntdq %%ymm0, 160(%[p])
+                \\ vmovntdq %%ymm0, 192(%[p])
+                \\ vmovntdq %%ymm0, 224(%[p])
                 :
                 : [p] "r" (ptr + i),
-                : "ymm0", "memory"
+                  [mem] "m" (@as([*]volatile u8, ptr)),
             );
         }
     }

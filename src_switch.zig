@@ -98,6 +98,8 @@ pub const SwitchEngine = struct {
         const new_gen = self.current_generation.fetchAdd(1, .acq_rel) + 1;
 
         // Atomic pointer swap (x86_64 TSO: release sufficient)
+        // TODO(ZIG_VERSION_GATE): Zig 0.17 @atomicLoad with fat pointer ([]const T)
+        //   may need validation. Keeping 0.16 syntax for now; verify after toolchain lock.
         const old_table = @atomicLoad(?*const []const RouteEntry, &self.l1_table, .acquire);
 
         // Update generation for new table

@@ -40,7 +40,7 @@ pub const BpfProgram = struct {
 
     pub fn detach(self: *BpfProgram) void {
         if (self.fd >= 0) {
-            std.posix.close(self.fd);
+            _ = std.os.linux.close(self.fd);
             self.fd = -1;
         }
     }
@@ -83,7 +83,7 @@ pub const BpfMap = struct {
 
     pub fn close(self: *BpfMap) void {
         if (self.fd >= 0) {
-            std.posix.close(self.fd);
+            _ = std.os.linux.close(self.fd);
             self.fd = -1;
         }
     }
