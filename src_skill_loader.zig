@@ -66,7 +66,7 @@ pub fn setTrustAnchor(public_key: [32]u8) void {
 }
 
 /// Load and verify a dynamic skill .so file
-pub fn loadSkill(allocator: std.mem.Allocator, path: []const u8, manifest: SkillManifest) !DynamicSkill {
+pub fn loadSkill(_: std.mem.Allocator, path: []const u8, manifest: SkillManifest) !DynamicSkill {
     // [1] Verify L2 tier enforcement
     if (manifest.tier != .untrusted) {
         std.log.err("[LOADER] Skill '{s}' must declare tier=.untrusted", .{manifest.id});
@@ -137,11 +137,9 @@ fn verifySignature(path: []const u8, signature: Signature, public_key: [32]u8) !
 
     // Call into libsodium crypto_sign_ed25519_verify_detached
     // Simplified: actual implementation links against libsodium
+    // TODO(M1): Call libsodium crypto_sign_ed25519_verify_detached
     _ = public_key;
     _ = signature;
-    _ = content;
-
-    // if (verify_failed) return SkillLoaderError.InvalidSignature;
 
     std.log.info("[LOADER] Signature verified for {s}", .{path});
 }

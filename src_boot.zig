@@ -176,11 +176,25 @@ fn registerCgroupId() !void {
 }
 
 fn getCurrentCgroupId() !u64 {
-    // On Linux 4.18+, /proc/self/cgroup contains cgroup v2 ID
-    // Simplified: use getcpu or read cgroupfs
-    // TODO(M1): Read actual cgroup v2 ID from /proc/self/cgroup or
-    //   statx(STATX_INO) on cgroupfs. Hardcoded M0 placeholder.
-    return 1; // Placeholder: actual implementation reads /proc/self/cgroup
+    // Read cgroup v2 path from /proc/self/cgroup
+    // cgroup v2 format: "0::/path/to/cgroup"
+    const content = try std.fs.cwd().readFileAlloc(std.heap.page_allocator, "/proc/self/cgroup", 4096);
+    defer std.heap.page_allocator.free(content);
+
+    var iter = std.mem.splitScalar(u8, std.mem.trimRight(u8, content, "\n"), '\n');
+    while (iter.next()) |line| {
+        if (line.len == 0) continue;
+        var field_iter = std.mem.splitScalar(u8, line, ':');
+        _ = field_iter.next(); // id (always 0 for v2)
+        const subsystem = field_iter.next() orelse continue;
+        const path = field_iter.next() orelse continue;
+        // cgroup v2: subsystem field is empty
+        if (subsystem.len == 0) {
+            // Return hash of path as cgroup ID (unique per cgroup)
+            return std.hash.Wyhash.hash(@as(u64, 0), path);
+        }
+    }
+    return error.CgroupV2NotFound;
 }
 
 // [4] HugePages check
@@ -190,8 +204,7 @@ fn checkHugePages() !void {
 
     var buf: [32]u8 = undefined;
     const n = try fd.read(&buf);
-    const nr = try std.fmt.parseInt(usize, std.mem.trim(u8, buf[0..n], " 
-"), 10);
+    const nr = try std.fmt.parseInt(usize, std.mem.trim(u8, buf[0..n], " "), 10);
 
     if (nr < 2048) {
         std.log.warn("[BOOT] HugePages {} < 2048, degrading to MAP_LOCKED", .{nr});

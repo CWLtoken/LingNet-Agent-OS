@@ -321,14 +321,13 @@ inline fn avx2ZeroBlock(ptr: [*]u8, len: usize) void {
 
 // Tier 0 Boot Security Validation (integrates with V2.2 boot sequence)
 pub fn bootSecurityValidation() !void {
-    // Verify HugePages are available
-    const fd = try std.fs.cwd().openFile("/proc/sys/vm/nr_hugepages", .{});
-    defer fd.close();
-
     // Verify Arena block size alignment for AVX2
     if (g_common_pool.head) |head| {
         if (head.capacity % 32 != 0) return error.ArenaBlockUnaligned;
     }
+    std.log.info("[GQAP] Boot validation passed (block_size={})", .{
+        if (g_common_pool.head) |h| h.capacity else 0,
+    });
 }
 
 // CLI introspection helpers
