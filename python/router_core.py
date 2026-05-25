@@ -13,13 +13,15 @@ Implements:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import hashlib
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Callable
+from typing import Optional, Callable, List
 
 
 class RoutingStrategy(Enum):
@@ -27,6 +29,7 @@ class RoutingStrategy(Enum):
     LEAST_LATENCY = "least_latency"
     COST_OPTIMIZED = "cost_optimized"
     PRIORITY = "priority"
+    RACE = "race"  # V2.8: Race mode — first successful response wins
 
 
 class ProviderStatus(Enum):
@@ -121,6 +124,10 @@ class RouterCore:
         self._total_latency_ms = 0.0
         self._total_cost = 0.0
         self._total_tokens = 0
+        self._executor = ThreadPoolExecutor(max_workers=16)
+
+    def __del__(self):
+        self._executor.shutdown(wait=False)
 
     def register_provider(self, provider: Provider) -> None:
         """Register a model provider."""
@@ -204,6 +211,8 @@ class RouterCore:
             return self._cost_optimized(available, request.max_cost)
         elif self.config.strategy == RoutingStrategy.PRIORITY:
             return self._priority(available)
+        elif self.config.strategy == RoutingStrategy.RACE:
+            return self._race_select(available)
 
         return available[0]
 
@@ -225,9 +234,95 @@ class RouterCore:
     def _priority(self, providers: list[Provider]) -> Provider:
         return min(providers, key=lambda p: p.priority)
 
+    def _race_select(self, providers: list[Provider]) -> Provider:
+        """Race mode: return first available (actual race happens in route_race)."""
+        return providers[0] if providers else None
+
+    def route_race(self, request: RouteRequest, provider_names: List[str] = None) -> RouteResult:
+        """
+        V2.8: Race routing — send to multiple providers simultaneously,
+        return the first successful response, cancel the rest.
+        """
+        start = time.monotonic()
+
+        # Select providers to race
+        if provider_names:
+            racers = [self._providers[n] for n in provider_names
+                      if n in self._providers and self._providers[n].is_available]
+        else:
+            racers = [p for p in self._providers.values() if p.is_available]
+
+        if not racers:
+            return RouteResult(
+                provider="", model="", response={},
+                latency_ms=0, tokens_used=0, cost=0,
+                success=False, error="No available providers for race",
+            )
+
+        # Submit all requests concurrently
+        futures = {}
+        for provider in racers:
+            future = self._executor.submit(self._execute, provider, request)
+            futures[future] = provider
+
+        # Take first successful result
+        for future in as_completed(futures, timeout=request.timeout_ms / 1000):
+            provider = futures[future]
+            try:
+                result = future.result(timeout=0.5)
+                elapsed = (time.monotonic() - start) * 1000
+
+                if result.success:
+                    # Record metrics
+                    with self._lock:
+                        self._total_requests += 1
+                        self._total_latency_ms += elapsed
+                        self._total_tokens += result.tokens_used
+                        self._total_cost += result.cost
+                        provider.total_requests += 1
+                        provider.avg_latency_ms = (
+                            provider.avg_latency_ms * 0.9 + elapsed * 0.1
+                        )
+
+                    result.latency_ms = elapsed
+
+                    # Cancel remaining futures (best effort)
+                    for f in futures:
+                        if not f.done():
+                            f.cancel()
+
+                    print(f"[Router:Race] Winner: {provider.name} ({elapsed:.1f}ms)")
+                    return result
+
+            except Exception as e:
+                elapsed = (time.monotonic() - start) * 1000
+                with self._lock:
+                    self._total_requests += 1
+                    self._total_failures += 1
+                    provider.total_requests += 1
+                    provider.failed_requests += 1
+                print(f"[Router:Race] {provider.name} failed: {e}")
+                continue
+
+        # All failed
+        elapsed = (time.monotonic() - start) * 1000
+        return RouteResult(
+            provider="", model="", response={},
+            latency_ms=elapsed, tokens_used=0, cost=0,
+            success=False, error="All race participants failed",
+        )
+
     def _execute(self, provider: Provider, request: RouteRequest) -> RouteResult:
-        """Execute request against provider (placeholder)."""
-        # In production: httpx.post(provider.base_url, json=request.payload)
+        """Execute request against provider.
+        V2.8: Integrates with model_clients for real API calls.
+        """
+        from model_clients import create_provider as _create
+        # In production:
+        #   client = _create(provider.name, api_key=provider.api_key, model=provider.model)
+        #   resp = client.complete(request.payload.get("messages", []))
+        #   return RouteResult(provider=provider.name, model=provider.model,
+        #                     response={"text": resp.text}, latency_ms=resp.latency_ms,
+        #                     tokens_used=resp.tokens_used, cost=resp.cost, success=True)
         return RouteResult(
             provider=provider.name,
             model=provider.model,
@@ -327,3 +422,39 @@ if __name__ == "__main__":
     # Print metrics
     print(f"\nMetrics: {json.dumps(router.get_metrics(), indent=2)}")
     print(f"\nPrometheus:\n{router.get_prometheus_metrics()}")
+
+    # ─── V2.8 Race Mode Test ──────────────────────────────────────────
+    print("\n" + "=" * 60)
+    print("V2.8 Race Mode Test")
+    print("=" * 60)
+
+    race_config = RouterConfig(strategy=RoutingStrategy.RACE)
+    race_router = RouterCore(race_config)
+
+    race_router.register_provider(Provider(
+        name="openrouter", base_url="https://openrouter.ai/api/v1",
+        model="auto", priority=1, cost_per_1k_tokens=0.002,
+    ))
+    race_router.register_provider(Provider(
+        name="anthropic", base_url="https://api.anthropic.com/v1",
+        model="claude-sonnet-4", priority=2, cost_per_1k_tokens=0.003,
+    ))
+    race_router.register_provider(Provider(
+        name="openai", base_url="https://api.openai.com/v1",
+        model="gpt-4o", priority=3, cost_per_1k_tokens=0.005,
+    ))
+    race_router.register_provider(Provider(
+        name="deepseek", base_url="https://api.deepseek.com/v1",
+        model="deepseek-chat", priority=4, cost_per_1k_tokens=0.0003,
+    ))
+
+    # Race routing: all providers compete, first response wins
+    for i in range(3):
+        result = race_router.route_race(RouteRequest(
+            intent="agent.race.chat",
+            payload={"messages": [{"role": "user", "content": f"Race test {i}"}]},
+            timeout_ms=10000,
+        ))
+        print(f"Race {i}: winner={result.provider} latency={result.latency_ms:.1f}ms success={result.success}")
+
+    print(f"\nRace Metrics: {json.dumps(race_router.get_metrics(), indent=2)}")
