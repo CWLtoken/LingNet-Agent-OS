@@ -207,8 +207,16 @@ pub fn build(b: *std.Build) void {
     main_mod.addImport("l2-loader", l2_loader_mod);
     main_mod.addImport("skill-gen", skill_gen_mod);
 
+    // === V2.9 E2E Integration Tests ===
+    const e2e_mod = b.createModule(.{
+        .root_source_file = b.path("src/e2e_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    e2e_mod.addImport("arena-gqap", gqap_mod);
+    main_mod.addImport("e2e-test", e2e_mod);
+
     // === V2.6 eBPF Compilation Pipeline ===
-    // Compile 3 BPF programs to ELF eBPF objects using clang
     // Note: In production, these would be proper build steps with dependencies
     const bpf_target_triple = "bpfel-unknown-none";
 
@@ -508,4 +516,9 @@ pub fn build(b: *std.Build) void {
     const skill_gen_test = b.addTest(.{ .root_module = skill_gen_mod });
     const run_skill_gen_test = b.addRunArtifact(skill_gen_test);
     test_step.dependOn(&run_skill_gen_test.step);
+
+    // === E2E Integration Tests: src/e2e_test.zig (V2.9) ===
+    const e2e_test = b.addTest(.{ .root_module = e2e_mod });
+    const run_e2e_test = b.addRunArtifact(e2e_test);
+    test_step.dependOn(&run_e2e_test.step);
 }
