@@ -114,12 +114,34 @@ pub fn build(b: *std.Build) void {
 
     // === Boot Module ===
     const boot_mod = b.createModule(.{
-        .root_source_file = b.path("src_boot.zig"),
+        .root_source_file = b.path("src/boot.zig"),
         .target = target,
         .optimize = optimize,
     });
     boot_mod.addImport("arena-gqap", gqap_mod);
-    boot_mod.addImport("nullclaw-mrc", mrc_mod);
+
+    // === V1 Compat Module ===
+    const v1compat_mod = b.createModule(.{
+        .root_source_file = b.path("src/v1_compat.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    v1compat_mod.addImport("arena-gqap", gqap_mod);
+
+    // === eBPF Verify Module ===
+    const bpf_verify_mod = b.createModule(.{
+        .root_source_file = b.path("src/bpf_verify.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // === VRF Test Module ===
+    const vrf_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/vrf_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    vrf_test_mod.addImport("arena-gqap", gqap_mod);
 
     // === Main Executable ===
     const main_mod = b.createModule(.{
@@ -136,6 +158,9 @@ pub fn build(b: *std.Build) void {
     main_mod.addImport("io-uring-route", iouring_mod);
     main_mod.addImport("hugepages", hugepages_mod);
     main_mod.addImport("metrics", metrics_mod);
+    main_mod.addImport("boot", boot_mod);
+    main_mod.addImport("v1-compat", v1compat_mod);
+    main_mod.addImport("bpf-verify", bpf_verify_mod);
     const exe = b.addExecutable(.{
         .name = "lingnet-daemon",
         .root_module = main_mod,
@@ -327,4 +352,24 @@ pub fn build(b: *std.Build) void {
     const metrics_test = b.addTest(.{ .root_module = metrics_mod });
     const run_metrics_test = b.addRunArtifact(metrics_test);
     test_step.dependOn(&run_metrics_test.step);
+
+    // === Unit Tests: src/boot.zig (V2.3) ===
+    const boot_test = b.addTest(.{ .root_module = boot_mod });
+    const run_boot_test = b.addRunArtifact(boot_test);
+    test_step.dependOn(&run_boot_test.step);
+
+    // === Unit Tests: src/v1_compat.zig (V2.3) ===
+    const v1compat_test = b.addTest(.{ .root_module = v1compat_mod });
+    const run_v1compat_test = b.addRunArtifact(v1compat_test);
+    test_step.dependOn(&run_v1compat_test.step);
+
+    // === Unit Tests: src/bpf_verify.zig (V2.3) ===
+    const bpf_verify_test = b.addTest(.{ .root_module = bpf_verify_mod });
+    const run_bpf_verify_test = b.addRunArtifact(bpf_verify_test);
+    test_step.dependOn(&run_bpf_verify_test.step);
+
+    // === Unit Tests: src/vrf_test.zig (V2.3) ===
+    const vrf_test_test = b.addTest(.{ .root_module = vrf_test_mod });
+    const run_vrf_test_test = b.addRunArtifact(vrf_test_test);
+    test_step.dependOn(&run_vrf_test_test.step);
 }
