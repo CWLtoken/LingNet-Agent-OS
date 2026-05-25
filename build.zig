@@ -214,6 +214,21 @@ pub fn build(b: *std.Build) void {
     const run_bench_route = b.addRunArtifact(bench_route_exe);
     bench_step.dependOn(&run_bench_route.step);
 
+    // === Benchmark: Performance (rdtsc + P99 histogram) ===
+    const bench_perf_mod = b.createModule(.{
+        .root_source_file = b.path("bench_perf.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_perf_mod.addImport("arena-gqap", gqap_mod);
+    const bench_perf_exe = b.addExecutable(.{
+        .name = "bench-perf",
+        .root_module = bench_perf_mod,
+    });
+    b.installArtifact(bench_perf_exe);
+    const run_bench_perf = b.addRunArtifact(bench_perf_exe);
+    bench_step.dependOn(&run_bench_perf.step);
+
     // === Unit Tests: sdk_arena_gqap.zig ===
     const gqap_test = b.addTest(.{
         .root_module = gqap_mod,
@@ -372,4 +387,15 @@ pub fn build(b: *std.Build) void {
     const vrf_test_test = b.addTest(.{ .root_module = vrf_test_mod });
     const run_vrf_test_test = b.addRunArtifact(vrf_test_test);
     test_step.dependOn(&run_vrf_test_test.step);
+
+    // === Unit Tests: bench_perf.zig (V2.4) ===
+    const perf_test_mod = b.createModule(.{
+        .root_source_file = b.path("bench_perf.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    perf_test_mod.addImport("arena-gqap", gqap_mod);
+    const perf_test = b.addTest(.{ .root_module = perf_test_mod });
+    const run_perf_test = b.addRunArtifact(perf_test);
+    test_step.dependOn(&run_perf_test.step);
 }
