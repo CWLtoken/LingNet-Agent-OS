@@ -5,6 +5,7 @@ const std = @import("std");
 const gqap = @import("arena-gqap");
 const ebpf = @import("ebpf-loader");
 const mrc = @import("nullclaw-mrc");
+const netlink = @import("tools-netlink-nl");
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
@@ -53,7 +54,13 @@ pub fn main(init: std.process.Init) !void {
 
     std.log.info("[MAIN] MRC engine ready (CAM=256, Flow=4096)", .{});
 
-    // [5] Print pool stats
+    // [5] Initialize netlink socket (libU_nl)
+    var nl_sock = try netlink.NlSock.socket(allocator, netlink.NETLINK_GENERIC, 0);
+    defer nl_sock.close();
+    try nl_sock.bind(0, 0);
+    std.log.info("[MAIN] Netlink socket ready (fd={d}, proto=GENERIC)", .{nl_sock.fd});
+
+    // [6] Print pool stats
     const stats = gqap.getStats();
     std.log.info("[MAIN] Pool stats: common={}, quarantine={}, l2={}", .{
         stats.common_free, stats.quarantine_pending, stats.l2_free,
@@ -61,7 +68,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.log.info("[MAIN] LingNet Agent OS V2.2 ready ✅", .{});
 
-    // [6] Main loop (placeholder: M2 will add event loop)
+    // [7] Main loop (placeholder: M2 will add event loop)
     std.log.info("[MAIN] Entering idle loop (signal-driven, pre-M2)...", .{});
     while (true) {
         _ = std.os.linux.pause();

@@ -29,6 +29,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // === Netlink API Module (libU_nl) ===
+    const netlink_mod = b.createModule(.{
+        .root_source_file = b.path("tools_netlink_nl.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // === Skill Loader Module (M2+) ===
 
     // === Switch Plane Module ===
@@ -58,6 +65,7 @@ pub fn build(b: *std.Build) void {
     main_mod.addImport("arena-gqap", gqap_mod);
     main_mod.addImport("ebpf-loader", ebpf_mod);
     main_mod.addImport("nullclaw-mrc", mrc_mod);
+    main_mod.addImport("tools-netlink-nl", netlink_mod);
     const exe = b.addExecutable(.{
         .name = "lingnet-daemon",
         .root_module = main_mod,
@@ -107,14 +115,27 @@ pub fn build(b: *std.Build) void {
     main_test_mod.addImport("arena-gqap", gqap_mod);
     main_test_mod.addImport("ebpf-loader", ebpf_mod);
     main_test_mod.addImport("nullclaw-mrc", mrc_mod);
+    main_test_mod.addImport("tools-netlink-nl", netlink_mod);
     const main_test = b.addTest(.{
         .root_module = main_test_mod,
     });
     const run_main_test = b.addRunArtifact(main_test);
+
+    // === Unit Tests: tools_netlink_nl.zig (libU_nl) ===
+    const netlink_test_mod = b.createModule(.{
+        .root_source_file = b.path("tools_netlink_nl.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const netlink_test = b.addTest(.{
+        .root_module = netlink_test_mod,
+    });
+    const run_netlink_test = b.addRunArtifact(netlink_test);
 
     // === Test Step ===
     const test_step = b.step("test", "Run all LingNet unit tests");
     test_step.dependOn(&run_gqap_test.step);
     test_step.dependOn(&run_mrc_test.step);
     test_step.dependOn(&run_main_test.step);
+    test_step.dependOn(&run_netlink_test.step);
 }
