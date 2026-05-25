@@ -184,6 +184,40 @@ pub fn build(b: *std.Build) void {
     main_mod.addImport("skill-scheduler", skill_scheduler_mod);
     main_mod.addImport("vfs", vfs_mod);
 
+    // === V2.6 eBPF Compilation Pipeline ===
+    // Compile 3 BPF programs to ELF eBPF objects using clang
+    // Note: In production, these would be proper build steps with dependencies
+    const bpf_target_triple = "bpfel-unknown-none";
+
+    _ = b.addSystemCommand(&[_][]const u8{
+        "clang", "-target", bpf_target_triple, "-O2", "-g",
+        "-I", "/usr/include/x86_64-linux-gnu",
+        "-I", "/usr/include",
+        "-D__TARGET_ARCH_x86",
+        "-c", "ebpf_lsm_policy.bpf.c",
+        "-o", "ebpf_lsm_policy.o",
+    });
+
+    _ = b.addSystemCommand(&[_][]const u8{
+        "clang", "-target", bpf_target_triple, "-O2", "-g",
+        "-I", "/usr/include/x86_64-linux-gnu",
+        "-I", "/usr/include",
+        "-D__TARGET_ARCH_x86",
+        "-c", "ebpf_runtime_monitor.bpf.c",
+        "-o", "ebpf_runtime_monitor.o",
+    });
+
+    _ = b.addSystemCommand(&[_][]const u8{
+        "clang", "-target", bpf_target_triple, "-O2", "-g",
+        "-I", "/usr/include/x86_64-linux-gnu",
+        "-I", "/usr/include",
+        "-D__TARGET_ARCH_x86",
+        "-c", "ebpf_arena_audit.bpf.c",
+        "-o", "ebpf_arena_audit.o",
+    });
+
+    // Embed BPF ELF objects via @embedFile in boot.zig
+
     const exe = b.addExecutable(.{
         .name = "lingnet-daemon",
         .root_module = main_mod,
