@@ -161,6 +161,29 @@ pub fn build(b: *std.Build) void {
     main_mod.addImport("boot", boot_mod);
     main_mod.addImport("v1-compat", v1compat_mod);
     main_mod.addImport("bpf-verify", bpf_verify_mod);
+    // === V2.5 Skill System ===
+    const skill_loader_mod = b.createModule(.{
+        .root_source_file = b.path("src/skill_loader.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    skill_loader_mod.addImport("arena-gqap", gqap_mod);
+    const skill_scheduler_mod = b.createModule(.{
+        .root_source_file = b.path("src/skill_scheduler.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    skill_scheduler_mod.addImport("arena-gqap", gqap_mod);
+    const vfs_mod = b.createModule(.{
+        .root_source_file = b.path("sdk/vfs.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    vfs_mod.addImport("arena-gqap", gqap_mod);
+    main_mod.addImport("skill-loader", skill_loader_mod);
+    main_mod.addImport("skill-scheduler", skill_scheduler_mod);
+    main_mod.addImport("vfs", vfs_mod);
+
     const exe = b.addExecutable(.{
         .name = "lingnet-daemon",
         .root_module = main_mod,
@@ -398,4 +421,19 @@ pub fn build(b: *std.Build) void {
     const perf_test = b.addTest(.{ .root_module = perf_test_mod });
     const run_perf_test = b.addRunArtifact(perf_test);
     test_step.dependOn(&run_perf_test.step);
+
+    // === Unit Tests: src/skill_loader.zig (V2.5) ===
+    const skill_loader_test = b.addTest(.{ .root_module = skill_loader_mod });
+    const run_skill_loader_test = b.addRunArtifact(skill_loader_test);
+    test_step.dependOn(&run_skill_loader_test.step);
+
+    // === Unit Tests: src/skill_scheduler.zig (V2.5) ===
+    const skill_scheduler_test = b.addTest(.{ .root_module = skill_scheduler_mod });
+    const run_skill_scheduler_test = b.addRunArtifact(skill_scheduler_test);
+    test_step.dependOn(&run_skill_scheduler_test.step);
+
+    // === Unit Tests: sdk/vfs.zig (V2.5) ===
+    const vfs_test = b.addTest(.{ .root_module = vfs_mod });
+    const run_vfs_test = b.addRunArtifact(vfs_test);
+    test_step.dependOn(&run_vfs_test.step);
 }

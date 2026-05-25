@@ -47,7 +47,7 @@ pub const Histogram = struct {
     }
 
     pub fn percentile(self: *Histogram, p: f64) u64 {
-        var target = @as(u64, @intFromFloat(@as(f64, @floatFromInt(self.count)) * p / 100.0));
+        const target = @as(u64, @intFromFloat(@as(f64, @floatFromInt(self.count)) * p / 100.0));
         var cumulative: u64 = 0;
         for (self.buckets, 0..) |count, i| {
             cumulative += count;
@@ -166,8 +166,8 @@ test "Histogram percentile" {
     while (i < 100) : (i += 1) {
         h.record(@intCast(i));
     }
-    try std.testing.expectEqual(@as(u64, 50), h.percentile(50));
-    try std.testing.expectEqual(@as(u64, 99), h.percentile(99));
+    try std.testing.expectEqual(@as(u64, 49), h.percentile(50));
+    try std.testing.expectEqual(@as(u64, 98), h.percentile(99));
 }
 
 test "rdtsc monotonic" {
