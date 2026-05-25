@@ -1,3 +1,7 @@
+//! LingNet Agent OS V2.2 — eBPF Loader
+//! Integrates: BPF bytecode loading, cgroup registration, kernel version check
+//! M1: Replaces libnl-dependent loader with Zig 0.17 native implementation
+
 const std = @import("std");
 
 pub const EbpfError = error{
