@@ -184,6 +184,29 @@ pub fn build(b: *std.Build) void {
     main_mod.addImport("skill-scheduler", skill_scheduler_mod);
     main_mod.addImport("vfs", vfs_mod);
 
+    // === V2.7 L2 Dynamic Skill System ===
+    const ed25519_mod = b.createModule(.{
+        .root_source_file = b.path("src/ed25519.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const l2_loader_mod = b.createModule(.{
+        .root_source_file = b.path("src/l2_loader.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    l2_loader_mod.addImport("arena-gqap", gqap_mod);
+    l2_loader_mod.addImport("ed25519", ed25519_mod);
+    const skill_gen_mod = b.createModule(.{
+        .root_source_file = b.path("skills/dynamic/generator.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    skill_gen_mod.addImport("arena-gqap", gqap_mod);
+    main_mod.addImport("ed25519", ed25519_mod);
+    main_mod.addImport("l2-loader", l2_loader_mod);
+    main_mod.addImport("skill-gen", skill_gen_mod);
+
     // === V2.6 eBPF Compilation Pipeline ===
     // Compile 3 BPF programs to ELF eBPF objects using clang
     // Note: In production, these would be proper build steps with dependencies
@@ -470,4 +493,19 @@ pub fn build(b: *std.Build) void {
     const vfs_test = b.addTest(.{ .root_module = vfs_mod });
     const run_vfs_test = b.addRunArtifact(vfs_test);
     test_step.dependOn(&run_vfs_test.step);
+
+    // === Unit Tests: src/ed25519.zig (V2.7) ===
+    const ed25519_test = b.addTest(.{ .root_module = ed25519_mod });
+    const run_ed25519_test = b.addRunArtifact(ed25519_test);
+    test_step.dependOn(&run_ed25519_test.step);
+
+    // === Unit Tests: src/l2_loader.zig (V2.7) ===
+    const l2_loader_test = b.addTest(.{ .root_module = l2_loader_mod });
+    const run_l2_loader_test = b.addRunArtifact(l2_loader_test);
+    test_step.dependOn(&run_l2_loader_test.step);
+
+    // === Unit Tests: skills/dynamic/generator.zig (V2.7) ===
+    const skill_gen_test = b.addTest(.{ .root_module = skill_gen_mod });
+    const run_skill_gen_test = b.addRunArtifact(skill_gen_test);
+    test_step.dependOn(&run_skill_gen_test.step);
 }
