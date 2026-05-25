@@ -45,6 +45,7 @@ var g_l2_pool: L2Pool = undefined;
 var g_stats: PoolStats = .{ .common_free = 0, .quarantine_pending = 0, .l2_free = 0, .total_sanitized = 0, .total_violations = 0 };
 var g_total_sanitized: std.atomic.Value(u64) = .{ .raw = 0 };
 var g_current_generation: std.atomic.Value(u64) = .{ .raw = 1 };
+var g_pools_initialized: std.atomic.Value(bool) = .{ .raw = false };
 
 /// Initialize all pools at daemon boot (called once from main.zig)
 pub fn initPools(allocator: std.mem.Allocator, block_count: usize, block_size: usize) !void {
@@ -74,6 +75,7 @@ pub fn initPools(allocator: std.mem.Allocator, block_count: usize, block_size: u
     g_quarantine_pool = .{ .head = null, .count = 0 };
     g_l2_pool = .{ .head = null, .count = 0 };
     g_stats.common_free = block_count;
+    g_pools_initialized.store(true, .release);
 }
 
 // Common Pool: L0/L1 trusted path (V2.0 semantics, zero-clearing overhead)
@@ -83,6 +85,8 @@ pub const CommonPool = struct {
 
     /// Pop block for trusted allocation. << 100ns target.
     pub fn pop(self: *CommonPool) ?*ArenaBlock {
+        // Guard against uninitialized pool
+        if (!g_pools_initialized.load(.acquire)) return null;
         while (true) {
             const head = @atomicLoad(?*ArenaBlock, &self.head, .acquire);
             if (head == null) return null;
@@ -146,6 +150,8 @@ pub const L2Pool = struct {
     count: usize,
 
     pub fn pop(self: *L2Pool) ?*ArenaBlock {
+        // Guard against uninitialized pool
+        if (!g_pools_initialized.load(.acquire)) return null;
         while (true) {
             const head = @atomicLoad(?*ArenaBlock, &self.head, .acquire);
             if (head == null) return null;

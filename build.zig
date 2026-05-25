@@ -43,6 +43,39 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // === Orchestrator Module ===
+    const orch_mod = b.createModule(.{
+        .root_source_file = b.path("src/orchestrator.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    orch_mod.addImport("arena-gqap", gqap_mod);
+    orch_mod.addImport("nullclaw-mrc", mrc_mod);
+
+    // === CLI Module ===
+    const cli_mod = b.createModule(.{
+        .root_source_file = b.path("src/cli.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cli_mod.addImport("arena-gqap", gqap_mod);
+
+    // === Cognitive Bridge Module ===
+    const cognitive_mod = b.createModule(.{
+        .root_source_file = b.path("src/cognitive.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cognitive_mod.addImport("arena-gqap", gqap_mod);
+
+    // === Sandbox Module ===
+    const sandbox_mod = b.createModule(.{
+        .root_source_file = b.path("sdk/sandbox.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sandbox_mod.addImport("arena-gqap", gqap_mod);
+
     // === Skill Loader Module (M2+) ===
 
     // === Switch Plane Module ===
@@ -159,4 +192,49 @@ pub fn build(b: *std.Build) void {
     });
     const run_zmq_test = b.addRunArtifact(zmq_test);
     test_step.dependOn(&run_zmq_test.step);
+
+    // === Unit Tests: src/orchestrator.zig ===
+    const orch_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/orchestrator.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    orch_test_mod.addImport("arena-gqap", gqap_mod);
+    orch_test_mod.addImport("nullclaw-mrc", mrc_mod);
+    const orch_test = b.addTest(.{ .root_module = orch_test_mod });
+    const run_orch_test = b.addRunArtifact(orch_test);
+    test_step.dependOn(&run_orch_test.step);
+
+    // === Unit Tests: src/cli.zig ===
+    const cli_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/cli.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cli_test_mod.addImport("arena-gqap", gqap_mod);
+    const cli_test = b.addTest(.{ .root_module = cli_test_mod });
+    const run_cli_test = b.addRunArtifact(cli_test);
+    test_step.dependOn(&run_cli_test.step);
+
+    // === Unit Tests: src/cognitive.zig ===
+    const cognitive_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/cognitive.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    cognitive_test_mod.addImport("arena-gqap", gqap_mod);
+    const cognitive_test = b.addTest(.{ .root_module = cognitive_test_mod });
+    const run_cognitive_test = b.addRunArtifact(cognitive_test);
+    test_step.dependOn(&run_cognitive_test.step);
+
+    // === Unit Tests: sdk/sandbox.zig ===
+    const sandbox_test_mod = b.createModule(.{
+        .root_source_file = b.path("sdk/sandbox.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    sandbox_test_mod.addImport("arena-gqap", gqap_mod);
+    const sandbox_test = b.addTest(.{ .root_module = sandbox_test_mod });
+    const run_sandbox_test = b.addRunArtifact(sandbox_test);
+    test_step.dependOn(&run_sandbox_test.step);
 }
