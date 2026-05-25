@@ -21,6 +21,33 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // === V2.3 New Modules ===
+    const switch_mod = b.createModule(.{
+        .root_source_file = b.path("src/switch.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    switch_mod.addImport("arena-gqap", gqap_mod);
+
+    const iouring_mod = b.createModule(.{
+        .root_source_file = b.path("src/io_uring_route.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const hugepages_mod = b.createModule(.{
+        .root_source_file = b.path("sdk/hugepages.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const metrics_mod = b.createModule(.{
+        .root_source_file = b.path("src/metrics.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    metrics_mod.addImport("arena-gqap", gqap_mod);
+
     // === MRC Data Plane Module ===
     const mrc_mod = b.createModule(.{
         .root_source_file = b.path("nullclaw-mrc.zig"),
@@ -85,15 +112,6 @@ pub fn build(b: *std.Build) void {
 
     // === Skill Loader Module (M2+) ===
 
-    // === Switch Plane Module ===
-    const switch_mod = b.createModule(.{
-        .root_source_file = b.path("src_switch.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    switch_mod.addImport("arena-gqap", gqap_mod);
-    switch_mod.addImport("nullclaw-mrc", mrc_mod);
-
     // === Boot Module ===
     const boot_mod = b.createModule(.{
         .root_source_file = b.path("src_boot.zig"),
@@ -114,6 +132,10 @@ pub fn build(b: *std.Build) void {
     main_mod.addImport("nullclaw-mrc", mrc_mod);
     main_mod.addImport("tools-netlink-nl", netlink_mod);
     main_mod.addImport("tools-zmq-ng", zmq_mod);
+    main_mod.addImport("switch", switch_mod);
+    main_mod.addImport("io-uring-route", iouring_mod);
+    main_mod.addImport("hugepages", hugepages_mod);
+    main_mod.addImport("metrics", metrics_mod);
     const exe = b.addExecutable(.{
         .name = "lingnet-daemon",
         .root_module = main_mod,
@@ -285,4 +307,24 @@ pub fn build(b: *std.Build) void {
     const phf_test = b.addTest(.{ .root_module = phf_test_mod });
     const run_phf_test = b.addRunArtifact(phf_test);
     test_step.dependOn(&run_phf_test.step);
+
+    // === Unit Tests: src/switch.zig (V2.3) ===
+    const switch_test = b.addTest(.{ .root_module = switch_mod });
+    const run_switch_test = b.addRunArtifact(switch_test);
+    test_step.dependOn(&run_switch_test.step);
+
+    // === Unit Tests: src/io_uring_route.zig (V2.3) ===
+    const iouring_test = b.addTest(.{ .root_module = iouring_mod });
+    const run_iouring_test = b.addRunArtifact(iouring_test);
+    test_step.dependOn(&run_iouring_test.step);
+
+    // === Unit Tests: sdk/hugepages.zig (V2.3) ===
+    const hugepages_test = b.addTest(.{ .root_module = hugepages_mod });
+    const run_hugepages_test = b.addRunArtifact(hugepages_test);
+    test_step.dependOn(&run_hugepages_test.step);
+
+    // === Unit Tests: src/metrics.zig (V2.3) ===
+    const metrics_test = b.addTest(.{ .root_module = metrics_mod });
+    const run_metrics_test = b.addRunArtifact(metrics_test);
+    test_step.dependOn(&run_metrics_test.step);
 }
