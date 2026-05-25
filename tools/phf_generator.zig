@@ -6,17 +6,22 @@ const std = @import("std");
 /// PHF using FNV-1a hash with seed search
 pub const Phf = struct {
     seed: u32,
-    buckets: []const i32,
     bucket_count: usize,
+    buckets: [256]i32,
 
     pub fn generate(comptime keys: []const u32) Phf {
+        @setEvalBranchQuota(100000);
         const n = keys.len;
-        const m = if (n == 0) 1 else n * 2;
+        const m = if (n == 0) 1 else if (n <= 5) n * 4 else if (n <= 10) n * 3 else n * 2;
+        const max_seed = if (n <= 10) 10000 else 1000;
 
-        // Try seeds until we find one with no collisions
+        var result: Phf = undefined;
+        result.bucket_count = m;
+        result.seed = 0;
+
         var seed: u32 = 1;
-        while (seed < 65536) : (seed += 1) {
-            var buckets: [128]i32 = undefined;
+        while (seed < max_seed) : (seed += 1) {
+            var buckets: [256]i32 = undefined;
             for (&buckets) |*b| b.* = -1;
             var ok = true;
             for (keys) |key| {
@@ -25,31 +30,31 @@ pub const Phf = struct {
                     ok = false;
                     break;
                 }
-                buckets[h] = @intCast(key);
+                buckets[h] = @bitCast(key);
             }
             if (ok) {
-                return .{ .seed = seed, .buckets = &buckets, .bucket_count = m };
+                result.seed = seed;
+                result.buckets = buckets;
+                return result;
             }
         }
 
         // Fallback: identity mapping (seed = 0)
-        var buckets: [128]i32 = undefined;
-        for (&buckets, 0..) |*b, i| {
-            b.* = if (i < n) @intCast(keys[i]) else -1;
+        for (&result.buckets, 0..) |*b, i| {
+            b.* = if (i < n) @bitCast(keys[i]) else -1;
         }
-        return .{ .seed = 0, .buckets = &buckets, .bucket_count = n };
+        return result;
     }
 
     pub fn lookup(self: Phf, key: u32) ?usize {
         if (self.seed == 0 or self.bucket_count == 0) {
-            // Linear search fallback
-            for (self.buckets, 0..) |b, i| {
-                if (b == @as(i32, @intCast(key))) return i;
+            for (&self.buckets, 0..) |b, i| {
+                if (@as(u32, @bitCast(b)) == key) return i;
             }
             return null;
         }
         const h = hashU32(key, self.seed) % @as(u32, @intCast(self.bucket_count));
-        if (self.buckets[h] == @as(i32, @intCast(key))) return h;
+        if (h < self.buckets.len and @as(u32, @bitCast(self.buckets[h])) == key) return h;
         return null;
     }
 
@@ -69,7 +74,7 @@ pub const Phf = struct {
 // ─── Tests ───────────────────────────────────────────────────────────
 
 test "Phf lookup" {
-    const keys = &[_]u32{ 100, 200, 300, 400, 500 };
+    const keys = &[_]u32{ 2001, 3002, 5003, 7004, 11005 };
     const phf = Phf.generate(keys);
 
     for (keys) |key| {

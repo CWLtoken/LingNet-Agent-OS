@@ -220,7 +220,7 @@ pub fn Arena(comptime tier: SecurityTier) type {
                 return error.OutOfMemory;
             }
 
-            const ptr: [*]T = @ptrCast(self.block.memory + self.offset);
+            const ptr: [*]T = @ptrCast(@alignCast(self.block.memory + self.offset));
             self.offset += aligned_size;
 
             if (comptime tier == .untrusted) {

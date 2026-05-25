@@ -14,6 +14,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // === PHF Generator Module ===
+    const phf_mod = b.createModule(.{
+        .root_source_file = b.path("tools/phf_generator.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // === MRC Data Plane Module ===
     const mrc_mod = b.createModule(.{
         .root_source_file = b.path("nullclaw-mrc.zig"),
@@ -128,6 +135,37 @@ pub fn build(b: *std.Build) void {
     const run_bench = b.addRunArtifact(bench_exe);
     const bench_step = b.step("bench", "Run GQAP benchmarks");
     bench_step.dependOn(&run_bench.step);
+
+    // === Benchmark: MRC Data Plane ===
+    const bench_mrc_mod = b.createModule(.{
+        .root_source_file = b.path("bench_mrc.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_mrc_mod.addImport("arena-gqap", gqap_mod);
+    const bench_mrc_exe = b.addExecutable(.{
+        .name = "bench-mrc",
+        .root_module = bench_mrc_mod,
+    });
+    b.installArtifact(bench_mrc_exe);
+    const run_bench_mrc = b.addRunArtifact(bench_mrc_exe);
+    bench_step.dependOn(&run_bench_mrc.step);
+
+    // === Benchmark: Routing Plane ===
+    const bench_route_mod = b.createModule(.{
+        .root_source_file = b.path("bench_route.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_route_mod.addImport("arena-gqap", gqap_mod);
+    bench_route_mod.addImport("phf_generator", phf_mod);
+    const bench_route_exe = b.addExecutable(.{
+        .name = "bench-route",
+        .root_module = bench_route_mod,
+    });
+    b.installArtifact(bench_route_exe);
+    const run_bench_route = b.addRunArtifact(bench_route_exe);
+    bench_step.dependOn(&run_bench_route.step);
 
     // === Unit Tests: sdk_arena_gqap.zig ===
     const gqap_test = b.addTest(.{
