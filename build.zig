@@ -36,6 +36,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // === ZMQ-ng Module (libzmq replacement) ===
+    const zmq_mod = b.createModule(.{
+        .root_source_file = b.path("tools_zmq_ng.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // === Skill Loader Module (M2+) ===
 
     // === Switch Plane Module ===
@@ -66,6 +73,7 @@ pub fn build(b: *std.Build) void {
     main_mod.addImport("ebpf-loader", ebpf_mod);
     main_mod.addImport("nullclaw-mrc", mrc_mod);
     main_mod.addImport("tools-netlink-nl", netlink_mod);
+    main_mod.addImport("tools-zmq-ng", zmq_mod);
     const exe = b.addExecutable(.{
         .name = "lingnet-daemon",
         .root_module = main_mod,
@@ -116,6 +124,7 @@ pub fn build(b: *std.Build) void {
     main_test_mod.addImport("ebpf-loader", ebpf_mod);
     main_test_mod.addImport("nullclaw-mrc", mrc_mod);
     main_test_mod.addImport("tools-netlink-nl", netlink_mod);
+    main_test_mod.addImport("tools-zmq-ng", zmq_mod);
     const main_test = b.addTest(.{
         .root_module = main_test_mod,
     });
@@ -138,4 +147,16 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mrc_test.step);
     test_step.dependOn(&run_main_test.step);
     test_step.dependOn(&run_netlink_test.step);
+
+    // === Unit Tests: tools_zmq_ng.zig (libzmq replacement) ===
+    const zmq_test_mod = b.createModule(.{
+        .root_source_file = b.path("tools_zmq_ng.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const zmq_test = b.addTest(.{
+        .root_module = zmq_test_mod,
+    });
+    const run_zmq_test = b.addRunArtifact(zmq_test);
+    test_step.dependOn(&run_zmq_test.step);
 }
