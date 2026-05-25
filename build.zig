@@ -237,4 +237,14 @@ pub fn build(b: *std.Build) void {
     const sandbox_test = b.addTest(.{ .root_module = sandbox_test_mod });
     const run_sandbox_test = b.addRunArtifact(sandbox_test);
     test_step.dependOn(&run_sandbox_test.step);
+
+    // === Unit Tests: tools/phf_generator.zig ===
+    const phf_test_mod = b.createModule(.{
+        .root_source_file = b.path("tools/phf_generator.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const phf_test = b.addTest(.{ .root_module = phf_test_mod });
+    const run_phf_test = b.addRunArtifact(phf_test);
+    test_step.dependOn(&run_phf_test.step);
 }
