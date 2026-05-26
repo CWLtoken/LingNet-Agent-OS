@@ -1,8 +1,10 @@
 //! LingNet Agent OS V2.5 — Skill Loader
 //! L0/L1/L2 三级加载, Ed25519签名验证, 沙箱隔离
+//! P1-2 FIX: L1 now uses std.c.dlopen for real .so loading with stub fallback
 
 const std = @import("std");
 const gqap = @import("arena-gqap");
+const c = std.c;
 
 /// Skill 层级
 pub const SkillTier = enum(u2) {
@@ -65,6 +67,10 @@ pub const SkillLoader = struct {
 
     pub fn deinit(self: *SkillLoader) void {
         for (self.skills.items) |*skill| {
+            // P1-2 FIX: Close .so handle if loaded via dlopen
+            if (skill.so_handle) |handle| {
+                _ = c.dlclose(handle);
+            }
             if (skill.arena) |arena| {
                 arena.deinit();
                 self.allocator.destroy(arena);
@@ -91,9 +97,57 @@ pub const SkillLoader = struct {
         std.log.info("[SkillLoader] L0 registered: {s}", .{name});
     }
 
-    /// 加载 L1 Skill (预编译 .so)
+    /// 加载 L1 Skill (预编译 .so) — P1-2 FIX: real dlopen loading with stub fallback
     pub fn loadL1(self: *SkillLoader, name: []const u8, path: []const u8) !void {
-        _ = path;
+        // P1-2 FIX: Use std.c.dlopen for real .so loading
+        var path_buf = try self.allocator.alloc(u8, path.len + 1);
+        defer self.allocator.free(path_buf);
+        @memcpy(path_buf[0..path.len], path);
+        path_buf[path.len] = 0;
+        const handle = c.dlopen(@as(?[*:0]const u8, @ptrCast(path_buf.ptr)), .{ .NOW = true }) orelse {
+            std.log.warn("[SkillLoader] L1 .so not found: {s} — using stub", .{path});
+            return self.loadL1Stub(name);
+        };
+        errdefer _ = c.dlclose(handle);
+
+        // Try to find entry point: {name}_init
+        var init_sym = try self.allocator.alloc(u8, name.len + 6); // "_init\0"
+        defer self.allocator.free(init_sym);
+        @memcpy(init_sym[0..name.len], name);
+        @memcpy(init_sym[name.len..][0..5], "_init");
+        init_sym[name.len + 5] = 0;
+        const init_sym_z: [:0]const u8 = init_sym[0..name.len + 5 :0];
+
+        const entry_fn_ptr = c.dlsym(handle, init_sym_z.ptr);
+        if (entry_fn_ptr == null) {
+            std.log.warn("[SkillLoader] Symbol '{s}' not found in {s} — using stub", .{ init_sym, path });
+            _ = c.dlclose(handle);
+            return self.loadL1Stub(name);
+        }
+        const entry_fn: *const fn () callconv(.c) void = @ptrCast(@alignCast(entry_fn_ptr));
+
+        const meta = SkillMeta{
+            .name = name,
+            .version = "2.5.0",
+            .tier = .l1,
+            .state = .loaded,
+            .signature = zeroArray64(),
+            .hash = zeroArray32(),
+            .entry_point = entry_fn,
+            .so_handle = handle,
+            .arena = blk: {
+                const a = try self.allocator.create(gqap.Arena(.untrusted));
+                a.* = try gqap.Arena(.untrusted).init();
+                break :blk a;
+            },
+            .error_code = 0,
+        };
+        try self.skills.append(self.allocator, meta);
+        std.log.info("[SkillLoader] L1 loaded: {s} from {s} (entry: {s})", .{ name, path, init_sym });
+    }
+
+    /// Fallback stub registration when .so is not available
+    fn loadL1Stub(self: *SkillLoader, name: []const u8) !void {
         const meta = SkillMeta{
             .name = name,
             .version = "2.5.0",
@@ -111,7 +165,7 @@ pub const SkillLoader = struct {
             .error_code = 0,
         };
         try self.skills.append(self.allocator, meta);
-        std.log.info("[SkillLoader] L1 loaded: {s}", .{name});
+        std.log.info("[SkillLoader] L1 stub loaded (no .so): {s}", .{name});
     }
 
     /// 加载 L2 Skill (运行时动态)
@@ -154,6 +208,10 @@ pub const SkillLoader = struct {
                     if (skill.entry_point) |entry| {
                         entry();
                     }
+                } else if (skill.tier == .l1) {
+                    if (skill.entry_point) |entry| {
+                        entry();
+                    }
                 } else {
                     std.log.info("[SkillLoader] Executing {s} (tier {})", .{ name, @intFromEnum(skill.tier) });
                 }
@@ -182,6 +240,9 @@ pub const SkillLoader = struct {
         for (self.skills.items, 0..) |*skill, i| {
             if (std.mem.eql(u8, skill.name, name)) {
                 if (skill.state == .running) return error.SkillStillRunning;
+                if (skill.so_handle) |handle| {
+                    _ = c.dlclose(handle);
+                }
                 if (skill.arena) |arena| {
                     arena.deinit();
                 }

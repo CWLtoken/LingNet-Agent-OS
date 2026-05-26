@@ -103,17 +103,18 @@ pub const SwitchTable = struct {
         try self.l2_map.put(intent_id, entry);
     }
 
-    // N4 FIX: O(1) HashMap lookup instead of O(n) linear scan
     pub fn lookup(self: *SwitchTable, intent_id: u32) ?*RouteEntry {
-        // L0: Direct index (< 1ns)
-        if (intent_id < self.l0_count) {
-            return &self.l0_routes[intent_id];
+        // L0: Linear scan by intent_id (small table, < 64 entries)
+        for (0..self.l0_count) |i| {
+            if (self.l0_routes[i].intent_id == intent_id) {
+                return &self.l0_routes[i];
+            }
         }
-        // L1: HashMap O(1)
+        // L1: HashMap O(1) — N4 FIX
         if (self.l1_map.getPtr(intent_id)) |entry| {
             return entry;
         }
-        // L2: HashMap O(1)
+        // L2: HashMap O(1) — N4 FIX
         if (self.l2_map.getPtr(intent_id)) |entry| {
             return entry;
         }

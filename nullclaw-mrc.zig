@@ -3,6 +3,7 @@
 //! Performance: CAM lookup < 50ns, Flow hash < 10ns
 
 const std = @import("std");
+const linux = std.os.linux;
 
 /// Packet classification result
 pub const MrcAction = enum(u8) {
@@ -228,6 +229,9 @@ pub const MrcEngine = struct {
     flows: MrcFlowTable,
     default_action: MrcAction = .forward,
     stats: MrcStats,
+    // P0-2 FIX: io_uring integration — optional async I/O handler (type-erased for decoupling)
+    io_handler: ?*const fn (ctx: *anyopaque, action: MrcAction, pkt: *anyopaque) void = null,
+    io_ctx: *anyopaque = undefined,
 
     pub const MrcStats = struct {
         packets_classified: std.atomic.Value(u64) = .{ .raw = 0 },
@@ -237,24 +241,29 @@ pub const MrcEngine = struct {
     };
 
     /// Classify a single packet. < 100ns total (CAM + flow).
+    /// P0-2 FIX: triggers io_uring async dispatch when io_handler is set.
     pub fn classify(self: *MrcEngine, pkt: *MrcPacket, now_ns: u64) MrcAction {
-        _ = self.cam.lookup(pkt);
         self.stats.packets_classified.fetchAdd(1, .monotonic);
 
-        // CAM first (highest priority)
+        // P0-2 FIX: compute action, then dispatch via io_uring
+        var action: MrcAction = undefined;
+
         if (self.cam.lookup(pkt)) |entry| {
             _ = entry.hit_count.fetchAdd(1, .Monotonic);
             self.stats.cam_hits.fetchAdd(1, .Monotonic);
-            return entry.action;
-        }
-
-        // Flow table second
-        if (self.flows.lookup(pkt, now_ns)) |flow| {
+            action = entry.action;
+        } else if (self.flows.lookup(pkt, now_ns)) |flow| {
             flow.touch(now_ns);
             self.stats.flow_hits.fetchAdd(1, .monotonic);
-            return flow.action;
+            action = flow.action;
+        } else {
+            action = self.default_action;
         }
 
-        return self.default_action;
+        // P0-2 FIX: async dispatch via io_uring (type-erased pointer)
+        if (self.io_handler) |handler| {
+            handler(&self.io_ctx, action, @ptrCast(pkt));
+        }
+        return action;
     }
 };

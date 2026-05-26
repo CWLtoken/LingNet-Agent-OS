@@ -486,7 +486,15 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_perf_test.step);
 
     // === Unit Tests: src/skill_loader.zig (V2.5) ===
-    const skill_loader_test = b.addTest(.{ .root_module = skill_loader_mod });
+    // P1-2 FIX: linkLibC for dlopen/dlsym/dlclose
+    const skill_loader_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/skill_loader.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    skill_loader_test_mod.addImport("arena-gqap", gqap_mod);
+    skill_loader_test_mod.link_libc = true;
+    const skill_loader_test = b.addTest(.{ .root_module = skill_loader_test_mod });
     const run_skill_loader_test = b.addRunArtifact(skill_loader_test);
     test_step.dependOn(&run_skill_loader_test.step);
 

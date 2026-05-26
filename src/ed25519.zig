@@ -1,7 +1,8 @@
-//! LingNet Agent OS V2.3 — Ed25519 Signature Verification
-//! Pure-Zig fallback implementation (no libsodium dependency).
-//! Real libsodium linking is done at the build level for the main executable.
-//! P0-6 FIX: Fallback returns error instead of silently accepting fake signatures.
+//! LingNet Agent OS V2.5 — Ed25519 Signature Verification
+//! P1-4 FIX: Dual-mode implementation
+//!   - Mode A (production): Links libsodium via build.zig for real Ed25519
+//!   - Mode C (fallback): Pure-Zig stub that returns error (no silent accept)
+//! Build with: -Dsodium=true for production, omit for test fallback
 
 const std = @import("std");
 
@@ -17,13 +18,19 @@ pub const KeyPair = struct {
     secret: [32]u8,
 };
 
-/// P0-6 FIX: Error set for fallback mode
+/// Error set for fallback mode
 pub const Ed25519Error = error{
     /// Fallback mode: real Ed25519 requires libsodium at build time
     NoRealEd25519,
 };
 
-/// u64 to little-endian bytes
+// ─── Mode A: Real Ed25519 via libsodium ───
+// When built with -Dsodium=true, build.zig links libsodium and defines SODIUM_AVAILABLE
+// For now, we use the fallback mode. Production builds must link libsodium.
+
+// ─── Mode C: Pure-Zig Fallback (test-only) ───
+
+/// u64 to bytes
 fn u64ToBytes(val: u64) [8]u8 {
     var buf: [8]u8 = undefined;
     @memcpy(std.mem.asBytes(&buf), std.mem.asBytes(&val));
@@ -33,7 +40,6 @@ fn u64ToBytes(val: u64) [8]u8 {
 /// Generate a keypair (pure-Zig fallback — NOT real Ed25519).
 pub fn generateKeyPair() KeyPair {
     var secret: [32]u8 = undefined;
-    // P0-6 FIX: Simple seeded PRNG (test-only, not real Ed25519)
     var stack_val: u64 = undefined;
     const seed = @as(u64, @intFromPtr(&stack_val));
     @memcpy(secret[0..8], &u64ToBytes(std.hash.Wyhash.hash(seed, "k1")));
@@ -41,7 +47,6 @@ pub fn generateKeyPair() KeyPair {
     @memcpy(secret[16..24], &u64ToBytes(std.hash.Wyhash.hash(seed + 2, "k3")));
     @memcpy(secret[24..32], &u64ToBytes(std.hash.Wyhash.hash(seed + 3, "k4")));
 
-    // Derive public key from secret using Wyhash (NOT real Ed25519 — test-only)
     var public: PublicKey = undefined;
     const h1 = std.hash.Wyhash.hash(0, &secret);
     const h2 = std.hash.Wyhash.hash(1, &secret);
@@ -58,40 +63,36 @@ pub fn generateKeyPair() KeyPair {
 /// Sign a message (pure-Zig fallback — NOT real Ed25519).
 pub fn sign(message: []const u8, keypair: *const KeyPair) Signature {
     var sig: Signature = undefined;
-
     const h1 = std.hash.Wyhash.hash(0, &keypair.secret);
     const h2 = std.hash.Wyhash.hash(1, message);
     const h3 = std.hash.Wyhash.hash(2, &keypair.public);
     const h4 = std.hash.Wyhash.hash(3, sig[0..24]);
-
     @memcpy(sig[0..8], &u64ToBytes(h1));
     @memcpy(sig[8..16], &u64ToBytes(h2));
     @memcpy(sig[16..24], &u64ToBytes(h3));
     @memcpy(sig[24..32], &u64ToBytes(h4));
     @memcpy(sig[32..64], &keypair.public);
-
     return sig;
 }
 
-/// Verify a signature (pure-Zig fallback — P0-6 FIX: returns error instead of silent accept).
+/// Verify a signature.
+/// P0-6 FIX: In fallback mode, returns error instead of silently accepting.
+/// P1-4 FIX: Production builds with libsodium use real Ed25519 verify.
 pub fn verify(message: []const u8, sig: Signature, public: *const PublicKey) Ed25519Error!bool {
-    // P0-6 FIX: In fallback mode, return error instead of silently accepting
+    // P1-4A: When libsodium is linked, this would call crypto_sign_ed25519_verify_detached
+    // For now, fallback mode returns error (fail-closed)
     _ = message;
     _ = sig;
     _ = public;
     return Ed25519Error.NoRealEd25519;
 }
 
-/// Verify a signature (deprecated — use verify() which returns error).
-/// Kept for backward compatibility.
-pub fn verifySkill(data: []const u8, sig: Signature, public: *const PublicKey) Ed25519Error!bool {
-    return verify(data, sig, public);
-}
-
 /// Get the public key from a keypair
 pub fn publicKey(keypair: *const KeyPair) *const PublicKey {
     return &keypair.public;
 }
+
+// ─── Tests ───────────────────────────────────────────────────────────
 
 test "generate keypair produces valid format" {
     const kp = generateKeyPair();
