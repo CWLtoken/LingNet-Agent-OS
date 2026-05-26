@@ -526,6 +526,38 @@ async def route_request(handle: int, request_json: str) -> str:
 _router_registry: Dict[int, ModelRouter] = {}
 
 
+# ─── P2-2 FIX: CFFI Bridge Layer ───
+# Boundary: Python = strategy selection only, Zig = HTTP execution
+# _call_provider is marked for migration to Zig (io_uring HTTP client)
+
+# CFFI entry point: Zig calls Python for strategy, Python returns decision
+# Zig then executes HTTP via io_uring and returns result back to Python
+async def select_provider(config_json: str, context_json: str) -> str:
+    """P2-2 FIX: Strategy-only entry point. Returns provider selection, not HTTP response."""
+    config = RoutingConfig(**json.loads(config_json))
+    context = json.loads(context_json)
+    # Pure strategy: pick provider based on config weights/cost/latency
+    model_router = ModelRouter(config, {})
+    selected = None
+    if config.strategy == RoutingStrategy.RACE:
+        selected = config.candidates[0] if config.candidates else None
+    elif config.strategy == RoutingStrategy.SMART and config.weights:
+        total_w = sum(config.weights.values())
+        if total_w > 0:
+            import random
+            pick = random.uniform(0, total_w)
+            cur = 0
+            for pid, w in config.weights.items():
+                cur += w
+                if cur >= pick:
+                    selected = pid
+                    break
+        selected = selected or (list(config.weights.keys())[0] if config.weights else None)
+    elif config.candidates:
+        idx = int(context.get("request_count", 0)) % len(config.candidates)
+        selected = config.candidates[idx]
+    return json.dumps({"provider": selected or "", "strategy": config.strategy.value})
+
+
 if __name__ == "__main__":
-    # Test mode
-    print("LingNet Router Core V2.2 - Python Layer initialized")
+    print("LingNet Router Core V2.5 - Python Layer initialized (thin strategy + CFFI bridge)")
