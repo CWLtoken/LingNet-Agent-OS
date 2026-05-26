@@ -43,7 +43,9 @@ var g_common_pool: CommonPool = undefined;
 var g_quarantine_pool: QuarantinePool = undefined;
 var g_l2_pool: L2Pool = undefined;
 var g_stats: PoolStats = .{ .common_free = 0, .quarantine_pending = 0, .l2_free = 0, .total_sanitized = 0, .total_violations = 0 };
+var g_total_sanitized: std.atomic.Value(u64) = .{ .raw = 0 };
 var g_current_generation: std.atomic.Value(u64) = .{ .raw = 1 };
+var g_pools_initialized: std.atomic.Value(bool) = .{ .raw = false };
 
 /// Initialize all pools at daemon boot (called once from main.zig)
 pub fn initPools(allocator: std.mem.Allocator, block_count: usize, block_size: usize) !void {
@@ -51,8 +53,8 @@ pub fn initPools(allocator: std.mem.Allocator, block_count: usize, block_size: u
     const backing = try std.posix.mmap(
         null,
         total_size,
-        std.posix.PROT.READ | std.posix.PROT.WRITE,
-        std.posix.MAP.PRIVATE | std.posix.MAP.ANONYMOUS | std.posix.MAP.HUGETLB,
+        std.posix.PROT{ .READ = true, .WRITE = true },
+        std.posix.MAP{ .TYPE = .PRIVATE, .ANONYMOUS = true },
         -1,
         0,
     );
@@ -73,6 +75,7 @@ pub fn initPools(allocator: std.mem.Allocator, block_count: usize, block_size: u
     g_quarantine_pool = .{ .head = null, .count = 0 };
     g_l2_pool = .{ .head = null, .count = 0 };
     g_stats.common_free = block_count;
+    g_pools_initialized.store(true, .release);
 }
 
 // Common Pool: L0/L1 trusted path (V2.0 semantics, zero-clearing overhead)
@@ -82,6 +85,8 @@ pub const CommonPool = struct {
 
     /// Pop block for trusted allocation. << 100ns target.
     pub fn pop(self: *CommonPool) ?*ArenaBlock {
+        // Guard against uninitialized pool
+        if (!g_pools_initialized.load(.acquire)) return null;
         while (true) {
             const head = @atomicLoad(?*ArenaBlock, &self.head, .acquire);
             if (head == null) return null;
@@ -145,6 +150,8 @@ pub const L2Pool = struct {
     count: usize,
 
     pub fn pop(self: *L2Pool) ?*ArenaBlock {
+        // Guard against uninitialized pool
+        if (!g_pools_initialized.load(.acquire)) return null;
         while (true) {
             const head = @atomicLoad(?*ArenaBlock, &self.head, .acquire);
             if (head == null) return null;
@@ -213,7 +220,7 @@ pub fn Arena(comptime tier: SecurityTier) type {
                 return error.OutOfMemory;
             }
 
-            const ptr: [*]T = @ptrCast(self.block.memory + self.offset);
+            const ptr: [*]T = @ptrCast(@alignCast(self.block.memory + self.offset));
             self.offset += aligned_size;
 
             if (comptime tier == .untrusted) {
@@ -278,16 +285,18 @@ pub fn sanitizerThreadLoop(config: SanitizerConfig) void {
             block.flags = .{ .zeroed = true, .quarantined = false };
             g_l2_pool.push(block);
             processed += 1;
-            _ = @atomicRmw(u64, &g_stats.total_sanitized, .Add, 1, .monotonic);
+            g_total_sanitized.fetchAdd(1, .monotonic);
         }
 
         if (processed == 0) {
-            std.posix.nanosleep(&.{ .tv_sec = 0, .tv_nsec = @intCast(config.wake_interval_ms * 1_000_000) }, null);
+            _ = std.os.linux.nanosleep(&.{ .tv_sec = 0, .tv_nsec = @intCast(config.wake_interval_ms * 1_000_000) }, null);
         }
     }
 }
 
 // AVX2 Optimized Zeroing (~20GB/s throughput, ~3us/64KB)
+// Note: Zig 0.17 asm syntax changed - no separate clobber section.
+// Memory clobber expressed via "+m" output constraint on dummy var.
 inline fn avx2ZeroBlock(ptr: [*]u8, len: usize) void {
     const block_len = std.mem.alignForward(usize, len, 32);
     var i: usize = 0;
@@ -295,18 +304,19 @@ inline fn avx2ZeroBlock(ptr: [*]u8, len: usize) void {
     if (builtin.cpu.arch == .x86_64 and comptime std.Target.x86.featureSetHas(builtin.cpu.features, .avx2)) {
         while (i + 256 <= block_len) : (i += 256) {
             asm volatile (
-                \ vpxor %%ymm0, %%ymm0, %%ymm0
-                \ vmovntdq %%ymm0, 0(%[p])
-                \ vmovntdq %%ymm0, 32(%[p])
-                \ vmovntdq %%ymm0, 64(%[p])
-                \ vmovntdq %%ymm0, 96(%[p])
-                \ vmovntdq %%ymm0, 128(%[p])
-                \ vmovntdq %%ymm0, 160(%[p])
-                \ vmovntdq %%ymm0, 192(%[p])
-                \ vmovntdq %%ymm0, 224(%[p])
+                \\ vpxor %%ymm0, %%ymm0, %%ymm0
+                \\ vmovntdq %%ymm0, 0(%[p])
+                \\ vmovntdq %%ymm0, 32(%[p])
+                \\ vmovntdq %%ymm0, 64(%[p])
+                \\ vmovntdq %%ymm0, 96(%[p])
+                \\ vmovntdq %%ymm0, 128(%[p])
+                \\ vmovntdq %%ymm0, 160(%[p])
+                \\ vmovntdq %%ymm0, 192(%[p])
+                \\ vmovntdq %%ymm0, 224(%[p])
                 :
                 : [p] "r" (ptr + i),
-                : "ymm0", "memory"
+                  [mem] "m" (@as([*]volatile u8, ptr)),
+                : .{ .memory = true }
             );
         }
     }
@@ -317,14 +327,13 @@ inline fn avx2ZeroBlock(ptr: [*]u8, len: usize) void {
 
 // Tier 0 Boot Security Validation (integrates with V2.2 boot sequence)
 pub fn bootSecurityValidation() !void {
-    // Verify HugePages are available
-    const fd = try std.fs.cwd().openFile("/proc/sys/vm/nr_hugepages", .{});
-    defer fd.close();
-
     // Verify Arena block size alignment for AVX2
     if (g_common_pool.head) |head| {
         if (head.capacity % 32 != 0) return error.ArenaBlockUnaligned;
     }
+    std.log.info("[GQAP] Boot validation passed (block_size={})", .{
+        if (g_common_pool.head) |h| h.capacity else 0,
+    });
 }
 
 // CLI introspection helpers
@@ -333,7 +342,7 @@ pub fn getStats() PoolStats {
         .common_free = g_common_pool.count,
         .quarantine_pending = g_quarantine_pool.count,
         .l2_free = g_l2_pool.count,
-        .total_sanitized = g_stats.total_sanitized,
+        .total_sanitized = g_total_sanitized.load(.monotonic),
         .total_violations = g_stats.total_violations,
     };
 }
@@ -344,4 +353,15 @@ pub fn incrementGeneration() void {
 
 pub fn currentGeneration() u64 {
     return g_current_generation.load(.acquire);
+}
+
+/// Sanitize one block from the quarantine pool (called by sanitizer thread).
+/// Returns true if a block was sanitized, false if quarantine was empty.
+pub fn sanitizeOne(current_gen: u64) bool {
+    const block = g_quarantine_pool.popSafe(current_gen) orelse return false;
+    avx2ZeroBlock(block.memory, block.capacity);
+    block.flags = .{ .zeroed = true, .quarantined = false };
+    g_l2_pool.push(block);
+    _ = g_total_sanitized.fetchAdd(1, .monotonic);
+    return true;
 }

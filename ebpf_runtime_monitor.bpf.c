@@ -6,9 +6,38 @@
  *  Trap 3: High-risk syscall full sampling (no missed execve/connect)
  */
 
+/* Must define target arch BEFORE any BPF includes */
+#ifndef __TARGET_ARCH_x86
+#define __TARGET_ARCH_x86
+#endif
+
 #include <vmlinux.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
+
+/* Kernel constants that may not be in vmlinux.h for 6.6 */
+#ifndef MAY_WRITE
+#define MAY_WRITE   0x02
+#endif
+#ifndef MAY_EXEC
+#define MAY_EXEC    0x01
+#endif
+#ifndef EPERM
+#define EPERM       1
+#endif
+#ifndef AF_PACKET
+#define AF_PACKET   17
+#endif
+#ifndef AF_INET
+#define AF_INET     2
+#endif
+/* syscall numbers for x86_64 */
+#ifndef __NR_openat
+#define __NR_openat  257
+#endif
+#ifndef __NR_socket
+#define __NR_socket  41
+#endif
 
 #define RISK_HIGH   1
 #define RISK_MID    2

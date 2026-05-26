@@ -49,11 +49,11 @@ pub const DynamicSkill = struct {
         }
 
         if (self.seccomp_fd >= 0) {
-            std.posix.close(self.seccomp_fd);
+            _ = std.os.linux.close(self.seccomp_fd);
         }
 
         if (self.landlock_fd >= 0) {
-            std.posix.close(self.landlock_fd);
+            _ = std.os.linux.close(self.landlock_fd);
         }
     }
 };
@@ -66,7 +66,7 @@ pub fn setTrustAnchor(public_key: [32]u8) void {
 }
 
 /// Load and verify a dynamic skill .so file
-pub fn loadSkill(allocator: std.mem.Allocator, path: []const u8, manifest: SkillManifest) !DynamicSkill {
+pub fn loadSkill(_: std.mem.Allocator, path: []const u8, manifest: SkillManifest) !DynamicSkill {
     // [1] Verify L2 tier enforcement
     if (manifest.tier != .untrusted) {
         std.log.err("[LOADER] Skill '{s}' must declare tier=.untrusted", .{manifest.id});
@@ -100,11 +100,11 @@ pub fn loadSkill(allocator: std.mem.Allocator, path: []const u8, manifest: Skill
 
     // [6] Install Seccomp-BPF filter
     const seccomp_fd = try installSeccompFilter();
-    errdefer std.posix.close(seccomp_fd);
+    errdefer _ = std.os.linux.close(seccomp_fd);
 
     // [7] Initialize Landlock sandbox
     const landlock_fd = try initLandlock();
-    errdefer std.posix.close(landlock_fd);
+    errdefer _ = std.os.linux.close(landlock_fd);
 
     // [8] dlopen the .so
     const handle = std.c.dlopen(path.ptr, std.c.RTLD.LAZY | std.c.RTLD.LOCAL);
@@ -137,11 +137,9 @@ fn verifySignature(path: []const u8, signature: Signature, public_key: [32]u8) !
 
     // Call into libsodium crypto_sign_ed25519_verify_detached
     // Simplified: actual implementation links against libsodium
+    // TODO(M1): Call libsodium crypto_sign_ed25519_verify_detached
     _ = public_key;
     _ = signature;
-    _ = content;
-
-    // if (verify_failed) return SkillLoaderError.InvalidSignature;
 
     std.log.info("[LOADER] Signature verified for {s}", .{path});
 }

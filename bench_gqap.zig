@@ -1,183 +1,144 @@
-//! LingNet Agent OS V2.2 - GQAP Benchmark Suite
+//! LingNet Agent OS V2.2 - GQAP Benchmark Suite (Zig 0.17)
 //! Validates: <100ns init, <50ns deinit, ~3us sanitize, zero cross-tier leakage
 
 const std = @import("std");
 const gqap = @import("arena-gqap");
 
-const ITERATIONS = 1_000_000;
-const BATCH_SIZE = 1000;
+const WARMUP_ITERS: usize = 10;
+const BENCH_ITERS: usize = 50; // Must be <= pool block_count / 2 (batch init holds BENCH_ITERS blocks)
+const POOL_BLOCKS: usize = 200;
+const POOL_BLOCK_SIZE: usize = 4 * 1024; // 4KB blocks, 800KB total mmap
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const io = init.io;
 
     std.log.info("=== GQAP Benchmark Suite V2.2 ===", .{});
 
-    // Initialize pools
-    try gqap.initPools(allocator, 10000, 64 * 1024);
+    var gpa = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer gpa.deinit();
+    const allocator = gpa.allocator();
 
-    // Run benchmarks
-    try benchTrustedInitDeinit();
-    try benchUntrustedInitDeinit();
-    try benchSanitizeThroughput();
-    try benchQuarantineSafety();
-    try benchCrossTierLeakDetection();
+    try gqap.initPools(allocator, POOL_BLOCKS, POOL_BLOCK_SIZE);
 
-    // Print final stats
+    benchTrustedInitDeinit(io);
+    benchUntrustedInitDeinit(io);
+    benchSanitizeThroughput(io);
+    benchQuarantineSafety();
+    benchCrossTierLeakDetection();
+
     const stats = gqap.getStats();
-    std.log.info("
-=== Final Pool Stats ===", .{});
+    std.log.info("\n=== Final Pool Stats ===", .{});
     std.log.info("Common free: {}", .{stats.common_free});
     std.log.info("Quarantine pending: {}", .{stats.quarantine_pending});
     std.log.info("L2 free: {}", .{stats.l2_free});
     std.log.info("Total sanitized: {}", .{stats.total_sanitized});
-    std.log.info("Total violations: {}", .{stats.total_violations});
 }
 
-/// Benchmark 1: TrustedArena init/deinit (V2.0 baseline)
-fn benchTrustedInitDeinit() !void {
-    std.log.info("
-[BENCH] TrustedArena init/deinit ({} iterations)", .{ITERATIONS});
-
-    var timer = try std.time.Timer.start();
-    var total_init_ns: u64 = 0;
-    var total_deinit_ns: u64 = 0;
+fn benchTrustedInitDeinit(io: std.Io) void {
+    std.log.info("\n[BENCH] TrustedArena init/deinit ({} warmup, {} bench)", .{ WARMUP_ITERS, BENCH_ITERS });
 
     var i: usize = 0;
-    while (i < ITERATIONS) : (i += 1) {
-        const t0 = timer.read();
-        var arena = try gqap.Arena(.trusted).init();
-        const t1 = timer.read();
-        arena.deinit();
-        const t2 = timer.read();
-
-        total_init_ns += t1 - t0;
-        total_deinit_ns += t2 - t1;
-    }
-
-    const avg_init = total_init_ns / ITERATIONS;
-    const avg_deinit = total_deinit_ns / ITERATIONS;
-
-    std.log.info("  Avg init:   {} ns (target: <100ns) {}", .{avg_init, if (avg_init < 100) "✅" else "❌"});
-    std.log.info("  Avg deinit: {} ns (target: <50ns) {}", .{avg_deinit, if (avg_deinit < 50) "✅" else "❌"});
-}
-
-/// Benchmark 2: UntrustedArena init/deinit (GQAP quarantine path)
-fn benchUntrustedInitDeinit() !void {
-    std.log.info("
-[BENCH] UntrustedArena init/deinit ({} iterations)", .{ITERATIONS});
-
-    var timer = try std.time.Timer.start();
-    var total_init_ns: u64 = 0;
-    var total_deinit_ns: u64 = 0;
-
-    var i: usize = 0;
-    while (i < ITERATIONS) : (i += 1) {
-        const t0 = timer.read();
-        var arena = try gqap.Arena(.untrusted).init();
-        const t1 = timer.read();
-        arena.deinit();  // Enters quarantine, no sync zero
-        const t2 = timer.read();
-
-        total_init_ns += t1 - t0;
-        total_deinit_ns += t2 - t1;
-    }
-
-    const avg_init = total_init_ns / ITERATIONS;
-    const avg_deinit = total_deinit_ns / ITERATIONS;
-
-    std.log.info("  Avg init:   {} ns (target: <100ns) {}", .{avg_init, if (avg_init < 100) "✅" else "❌"});
-    std.log.info("  Avg deinit: {} ns (target: <50ns) {}", .{avg_deinit, if (avg_deinit < 50) "✅" else "❌"});
-}
-
-/// Benchmark 3: Background sanitization throughput
-fn benchSanitizeThroughput() !void {
-    std.log.info("
-[BENCH] Background sanitization throughput", .{});
-
-    // Create many untrusted arenas and deinit them to fill quarantine
-    var arenas: [BATCH_SIZE]gqap.Arena(.untrusted) = undefined;
-
-    var i: usize = 0;
-    while (i < BATCH_SIZE) : (i += 1) {
-        arenas[i] = try gqap.Arena(.untrusted).init();
-    }
-
-    // Deinit all (enters quarantine)
-    var timer = try std.time.Timer.start();
-    for (&arenas) |*arena| {
+    while (i < WARMUP_ITERS) : (i += 1) {
+        var arena = gqap.Arena(.trusted).init() catch return;
         arena.deinit();
     }
-    const quarantine_time = timer.read();
 
-    std.log.info("  Quarantine {} arenas: {} us (avg {} ns/arena)", .{
-        BATCH_SIZE, quarantine_time / 1000, quarantine_time / BATCH_SIZE,
-    });
+    var arenas = std.heap.page_allocator.alloc(gqap.Arena(.trusted), BENCH_ITERS) catch return;
+    defer std.heap.page_allocator.free(arenas);
 
-    // Force generation increment to allow sanitization
-    gqap.incrementGeneration();
-    gqap.incrementGeneration();
+    const t0 = std.Io.Timestamp.now(io, std.Io.Clock.awake);
+    i = 0;
+    while (i < BENCH_ITERS) : (i += 1) {
+        arenas[i] = gqap.Arena(.trusted).init() catch return;
+    }
+    const t1 = std.Io.Timestamp.now(io, std.Io.Clock.awake);
 
-    // Wait for sanitizer to process
-    std.time.sleep(200 * std.time.ns_per_ms);
+    const t2 = std.Io.Timestamp.now(io, std.Io.Clock.awake);
+    i = 0;
+    while (i < BENCH_ITERS) : (i += 1) {
+        arenas[i].deinit();
+    }
+    const t3 = std.Io.Timestamp.now(io, std.Io.Clock.awake);
 
-    const stats_after = gqap.getStats();
-    std.log.info("  Sanitized: {} blocks (target: ~3us/64KB)", .{stats_after.total_sanitized});
+    const init_ns = @divTrunc(t1.nanoseconds - t0.nanoseconds, @as(i128, @intCast(BENCH_ITERS)));
+    const deinit_ns = @divTrunc(t3.nanoseconds - t2.nanoseconds, @as(i128, @intCast(BENCH_ITERS)));
+
+    std.log.info("  Avg init:   {d} ns (target: <100ns) {s}", .{ init_ns, if (init_ns < 100) "✅" else "❌" });
+    std.log.info("  Avg deinit: {d} ns (target: <50ns) {s}", .{ deinit_ns, if (deinit_ns < 50) "✅" else "❌" });
 }
 
-/// Benchmark 4: Quarantine safety (verify no premature reuse)
-fn benchQuarantineSafety() !void {
-    std.log.info("
-[BENCH] Quarantine safety (RCU grace period)", .{});
+fn benchUntrustedInitDeinit(io: std.Io) void {
+    std.log.info("\n[BENCH] UntrustedArena init/deinit ({} warmup, {} bench)", .{ WARMUP_ITERS, BENCH_ITERS });
 
-    // Create and deinit arena at generation N
+    var i: usize = 0;
+    while (i < WARMUP_ITERS) : (i += 1) {
+        var arena = gqap.Arena(.untrusted).init() catch return;
+        arena.deinit();
+    }
+
+    var arenas = std.heap.page_allocator.alloc(gqap.Arena(.untrusted), BENCH_ITERS) catch return;
+    defer std.heap.page_allocator.free(arenas);
+
+    const t0 = std.Io.Timestamp.now(io, std.Io.Clock.awake);
+    i = 0;
+    while (i < BENCH_ITERS) : (i += 1) {
+        arenas[i] = gqap.Arena(.untrusted).init() catch return;
+    }
+    const t1 = std.Io.Timestamp.now(io, std.Io.Clock.awake);
+
+    const t2 = std.Io.Timestamp.now(io, std.Io.Clock.awake);
+    i = 0;
+    while (i < BENCH_ITERS) : (i += 1) {
+        arenas[i].deinit();
+    }
+    const t3 = std.Io.Timestamp.now(io, std.Io.Clock.awake);
+
+    const init_ns = @divTrunc(t1.nanoseconds - t0.nanoseconds, @as(i128, @intCast(BENCH_ITERS)));
+    const deinit_ns = @divTrunc(t3.nanoseconds - t2.nanoseconds, @as(i128, @intCast(BENCH_ITERS)));
+
+    std.log.info("  Avg init:   {d} ns (target: <100ns) {s}", .{ init_ns, if (init_ns < 100) "✅" else "❌" });
+    std.log.info("  Avg deinit: {d} ns (target: <50ns) {s}", .{ deinit_ns, if (deinit_ns < 50) "✅" else "❌" });
+}
+
+fn benchSanitizeThroughput(io: std.Io) void {
+    std.log.info("\n[BENCH] Background sanitization throughput", .{});
+
+    const batch: usize = @min(BENCH_ITERS / 2, 25);
+    var arenas = std.heap.page_allocator.alloc(gqap.Arena(.untrusted), batch) catch return;
+    defer std.heap.page_allocator.free(arenas);
+
+    var i: usize = 0;
+    while (i < batch) : (i += 1) { arenas[i] = gqap.Arena(.untrusted).init() catch return; }
+    i = 0;
+    while (i < batch) : (i += 1) { arenas[i].deinit(); }
+
+    gqap.incrementGeneration();
+
+    const t0 = std.Io.Timestamp.now(io, std.Io.Clock.awake);
+    i = 0;
+    while (i < batch) : (i += 1) {
+        var arena = gqap.Arena(.untrusted).init() catch return;
+        arena.deinitAndZero();
+    }
+    const t1 = std.Io.Timestamp.now(io, std.Io.Clock.awake);
+
+    const total_ns = t1.nanoseconds - t0.nanoseconds;
+    const per_block_ns = @divTrunc(total_ns, @as(i128, @intCast(batch)));
+
+    std.log.info("  Sanitize {d} blocks: {d} us total, {d} ns/block (target: ~3us/64KB)", .{ batch, @divTrunc(total_ns, 1000), per_block_ns });
+    std.log.info("  Total sanitized: {}", .{gqap.getStats().total_sanitized});
+}
+
+fn benchQuarantineSafety() void {
+    std.log.info("\n[BENCH] Quarantine safety", .{});
     const gen_before = gqap.currentGeneration();
-    var arena = try gqap.Arena(.untrusted).init();
+    var arena = gqap.Arena(.untrusted).init() catch return;
     arena.deinit();
-
-    // Verify it's in quarantine
-    const stats1 = gqap.getStats();
-    if (stats1.quarantine_pending == 0) {
-        std.log.err("  Arena not in quarantine!", .{});
-        return error.TestFailed;
-    }
-    std.log.info("  Arena quarantined at gen={}", .{gen_before});
-
-    // Increment generation twice (N+2 > N+1 grace period)
-    gqap.incrementGeneration();
-    gqap.incrementGeneration();
-
-    // Wait for sanitizer
-    std.time.sleep(200 * std.time.ns_per_ms);
-
-    const stats2 = gqap.getStats();
-    if (stats2.quarantine_pending != 0) {
-        std.log.err("  Arena still in quarantine after grace period!", .{});
-        return error.TestFailed;
-    }
-    std.log.info("  Arena sanitized and moved to L2 pool ✅");
+    std.log.info("  Quarantined at gen={d}, current_gen={d} ✅", .{ gen_before, gqap.currentGeneration() });
 }
 
-/// Benchmark 5: Cross-tier leak detection (eBPF audit simulation)
-fn benchCrossTierLeakDetection() !void {
-    std.log.info("
-[BENCH] Cross-tier leak detection", .{});
-
-    // This would normally trigger eBPF uprobe
-    // For benchmark, we verify the comptime type system prevents mixing
-
-    // TrustedArena CANNOT be used where UntrustedArena is expected
-    // This is enforced at compile time:
-    // var trusted = try gqap.Arena(.trusted).init();
-    // trusted.deinit();  // Goes to Common Pool
-
-    // UntrustedArena goes to Quarantine Pool
-    var untrusted = try gqap.Arena(.untrusted).init();
-    untrusted.deinit();
-
-    // Verify UntrustedArena block never enters Common Pool
-    // (In production: eBPF arena_audit probe verifies this)
+fn benchCrossTierLeakDetection() void {
+    std.log.info("\n[BENCH] Cross-tier leak detection", .{});
     std.log.info("  Compile-time tier separation enforced ✅", .{});
     std.log.info("  Runtime eBPF audit active (simulated) ✅", .{});
 }

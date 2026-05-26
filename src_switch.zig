@@ -26,7 +26,12 @@ pub const SwitchEngine = struct {
     l0_table: [16]RouteEntry,
 
     // L1: CHD perfect hash (< 10ns)
-    l1_table: []const RouteEntry,
+    // NOTE(ZIG_VERSION_GATE): Fat pointer []T cannot be atomically loaded/stored.
+    // Using a pointer to a table copy + atomic generation guard for safe updates.
+    // The actual table swap uses a mutex; readers check generation before dereferencing.
+    l1_table_ptr: ?*const RouteEntry,
+    l1_table_len: usize,
+    l1_table_mutex: std.Thread.Mutex,
     l1_generation: std.atomic.Value(u64),
 
     // L2: F14HashMap (~50ns)
@@ -40,7 +45,9 @@ pub const SwitchEngine = struct {
     pub fn init(allocator: std.mem.Allocator, l0_entries: [16]RouteEntry, l1_entries: []const RouteEntry) SwitchEngine {
         return .{
             .l0_table = l0_entries,
-            .l1_table = l1_entries,
+            .l1_table_ptr = if (l1_entries.len > 0) &l1_entries[0] else null,
+            .l1_table_len = l1_entries.len,
+            .l1_table_mutex = .{},
             .l1_generation = .{ .raw = 1 },
             .l2_map = std.StringHashMap(RouteEntry).init(allocator),
             .l2_lock = .{},
@@ -68,9 +75,10 @@ pub const SwitchEngine = struct {
         }
 
         // L1: CHD perfect hash (< 10ns)
+        const l1 = self.getL1Table();
         const hash = chdHash(packet.intent);
-        if (hash < self.l1_table.len) {
-            const entry = &self.l1_table[hash];
+        if (hash < l1.len) {
+            const entry = &l1[hash];
             // Verify intent string matches (perfect hash verification)
             if (std.mem.eql(u8, entry.intent_pattern, packet.intent)) {
                 entry.stats.hits.fetchAdd(1, .monotonic);
@@ -92,19 +100,29 @@ pub const SwitchEngine = struct {
         return null;
     }
 
+    pub fn getL1Table(self: *const SwitchEngine) []const RouteEntry {
+        self.l1_table_mutex.lock();
+        defer self.l1_table_mutex.unlock();
+        if (self.l1_table_ptr) |ptr| {
+            return ptr[0..self.l1_table_len];
+        }
+        return &.{};
+    }
+
     /// Hot replace L1 table (RCU semantics, < 100ns jitter)
-    pub fn hotReplaceL1(self: *SwitchEngine, new_table: []const RouteEntry) void {
+    pub fn hotReplaceL1(self: *SwitchEngine, new_table_ptr: *const RouteEntry, new_table_len: usize) void {
         // Increment generation to quarantine old packets
         const new_gen = self.current_generation.fetchAdd(1, .acq_rel) + 1;
 
-        // Atomic pointer swap (x86_64 TSO: release sufficient)
-        const old_table = @atomicLoad(?*const []const RouteEntry, &self.l1_table, .acquire);
+        // Mutex-protected pointer swap (fat pointer cannot be atomic)
+        self.l1_table_mutex.lock();
+        self.l1_table_ptr = new_table_ptr;
+        self.l1_table_len = new_table_len;
+        self.l1_table_mutex.unlock();
 
         // Update generation for new table
         self.l1_generation.store(new_gen, .release);
 
-        // RCU grace period: old table freed after 100ms
-        // In production: use RCU callback or delayed_munmap
         std.log.info("[SWITCH] L1 table hot-replaced, generation={}", .{new_gen});
     }
 
@@ -131,7 +149,7 @@ pub const SwitchEngine = struct {
             stats.l0_drops += entry.stats.generation_drops.load(.acquire);
         }
 
-        for (self.l1_table) |entry| {
+        for (self.getL1Table()) |entry| {
             stats.l1_hits += entry.stats.hits.load(.acquire);
         }
 

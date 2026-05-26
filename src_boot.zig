@@ -143,8 +143,9 @@ fn loadEbpfPrograms(cap: EbpfCapability) !void {
 
 fn loadBpfProgram(comptime import_name: []const u8, comptime filename: []const u8) !void {
     const bytecode = @embedFile(import_name);
-    // Call into tools/ebpf_loader.zig
-    try ebpfLoader.load(bytecode);
+    // Use @import to access ebpf loader comptime module
+    const ebpf_loader = @import("tools_ebpf_loader");
+    try ebpf_loader.load(bytecode);
     std.log.info("[BOOT] Loaded BPF program: {s}", .{filename});
 }
 
@@ -153,7 +154,8 @@ fn registerCgroupId() !void {
     const cgroup_id = try getCurrentCgroupId();
 
     // Write to lingnet_cgroup map (fd from loaded BPF)
-    const map_fd = try ebpfLoader.getMapFd("lingnet_cgroup");
+    const ebpf_loader = @import("tools_ebpf_loader");
+    const map_fd = try ebpf_loader.getMapFd("lingnet_cgroup");
 
     var key: u64 = cgroup_id;
     var value: u32 = 1;
@@ -174,9 +176,25 @@ fn registerCgroupId() !void {
 }
 
 fn getCurrentCgroupId() !u64 {
-    // On Linux 4.18+, /proc/self/cgroup contains cgroup v2 ID
-    // Simplified: use getcpu or read cgroupfs
-    return 1; // Placeholder: actual implementation reads /proc/self/cgroup
+    // Read cgroup v2 path from /proc/self/cgroup
+    // cgroup v2 format: "0::/path/to/cgroup"
+    const content = try std.fs.cwd().readFileAlloc(std.heap.page_allocator, "/proc/self/cgroup", 4096);
+    defer std.heap.page_allocator.free(content);
+
+    var iter = std.mem.splitScalar(u8, std.mem.trimRight(u8, content, "\n"), '\n');
+    while (iter.next()) |line| {
+        if (line.len == 0) continue;
+        var field_iter = std.mem.splitScalar(u8, line, ':');
+        _ = field_iter.next(); // id (always 0 for v2)
+        const subsystem = field_iter.next() orelse continue;
+        const path = field_iter.next() orelse continue;
+        // cgroup v2: subsystem field is empty
+        if (subsystem.len == 0) {
+            // Return hash of path as cgroup ID (unique per cgroup)
+            return std.hash.Wyhash.hash(@as(u64, 0), path);
+        }
+    }
+    return error.CgroupV2NotFound;
 }
 
 // [4] HugePages check
@@ -186,8 +204,7 @@ fn checkHugePages() !void {
 
     var buf: [32]u8 = undefined;
     const n = try fd.read(&buf);
-    const nr = try std.fmt.parseInt(usize, std.mem.trim(u8, buf[0..n], " 
-"), 10);
+    const nr = try std.fmt.parseInt(usize, std.mem.trim(u8, buf[0..n], " "), 10);
 
     if (nr < 2048) {
         std.log.warn("[BOOT] HugePages {} < 2048, degrading to MAP_LOCKED", .{nr});
@@ -219,7 +236,7 @@ fn protectL0Segment() !void {
     const ret = std.os.linux.mprotect(
         l0_start,
         l0_size,
-        std.os.linux.PROT.READ | std.os.linux.PROT.EXEC,
+        @bitCast(std.os.linux.PROT{ .READ = true, .EXEC = true }),
     );
 
     if (ret != 0) {

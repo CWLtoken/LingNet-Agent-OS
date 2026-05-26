@@ -7,10 +7,26 @@
  * Performance target: < 1% overhead via BPF map batching
  */
 
+/* Must define target arch BEFORE any BPF includes */
+#ifndef __TARGET_ARCH_x86
+#define __TARGET_ARCH_x86
+#endif
+
 #include <vmlinux.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
+
+/* Kernel constants that may not be in vmlinux.h for 6.6 */
+#ifndef EPERM
+#define EPERM       1
+#endif
+#ifndef PROT_WRITE
+#define PROT_WRITE  0x02
+#endif
+#ifndef PROT_EXEC
+#define PROT_EXEC   0x04
+#endif
 
 #define EVENT_ARENA_VIOLATION 1
 #define EVENT_DOUBLE_FREE     2
@@ -41,7 +57,7 @@ struct {
     __uint(max_entries, 10240);
     __type(key, u64);      /* block_id (physical address) */
     __type(value, u8);     /* state */
-} block_state SEC(".maps");
+} blk_state SEC(".maps");
 
 /* Track block generation for mismatch detection */
 struct {
@@ -74,7 +90,7 @@ int trace_arena_alloc(struct pt_regs *ctx) {
     u8 tier = (u8)PT_REGS_PARM2(ctx);  /* 1=trusted, 2=untrusted */
     u64 gen = PT_REGS_PARM3(ctx);
 
-    u8 *old_state = bpf_map_lookup_elem(&block_state, &block_id);
+    u8 *old_state = bpf_map_lookup_elem(&blk_state, &block_id);
     if (old_state && *old_state != 0) {
         /* Double-alloc without free: potential use-after-free or corruption */
         struct arena_event e = {
@@ -89,7 +105,7 @@ int trace_arena_alloc(struct pt_regs *ctx) {
         bpf_perf_event_output(ctx, &arena_events, BPF_F_CURRENT_CPU, &e, sizeof(e));
     }
 
-    bpf_map_update_elem(&block_state, &block_id, &tier, BPF_ANY);
+    bpf_map_update_elem(&blk_state, &block_id, &tier, BPF_ANY);
     bpf_map_update_elem(&block_generation, &block_id, &gen, BPF_ANY);
     return 0;
 }
@@ -105,7 +121,7 @@ int trace_arena_deinit(struct pt_regs *ctx) {
     u8 dest_tier = (u8)PT_REGS_PARM2(ctx);  /* 0=common, 1=l2, 2=quarantine */
     u64 retired_gen = PT_REGS_PARM3(ctx);
 
-    u8 *state = bpf_map_lookup_elem(&block_state, &block_id);
+    u8 *state = bpf_map_lookup_elem(&blk_state, &block_id);
     if (!state)
         return 0;
 
@@ -127,7 +143,7 @@ int trace_arena_deinit(struct pt_regs *ctx) {
 
     /* Update state: quarantine stays 3, l2 becomes 2, common becomes 0 */
     u8 new_state = (dest_tier == 2) ? 3 : ((dest_tier == 1) ? 2 : 0);
-    bpf_map_update_elem(&block_state, &block_id, &new_state, BPF_ANY);
+    bpf_map_update_elem(&blk_state, &block_id, &new_state, BPF_ANY);
     return 0;
 }
 

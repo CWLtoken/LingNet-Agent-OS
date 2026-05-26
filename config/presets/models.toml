@@ -1,0 +1,87 @@
+# LingNet Agent OS V2.2 — Multi-Model Presets
+# 多模型路由预设配置
+
+[meta]
+version = "2.2.0"
+description = "Default model presets for LingNet Agent OS"
+
+# ─── OpenAI ──────────────────────────────────────────────────────────
+
+[[provider]]
+id = "openai"
+name = "OpenAI"
+endpoint = "https://api.openai.com/v1"
+api_compat = "openai"
+weight = 10
+models = [
+    { id = "gpt-4o",             cost_in = 2.50,  cost_out = 10.00, context_len = 128000 },
+    { id = "gpt-4o-mini",        cost_in = 0.15,  cost_out = 0.60,  context_len = 128000 },
+    { id = "gpt-4-turbo",        cost_in = 10.00, cost_out = 30.00, context_len = 128000 },
+    { id = "gpt-3.5-turbo",      cost_in = 0.50,  cost_out = 1.50,  context_len = 16384 },
+]
+
+# ─── DeepSeek ────────────────────────────────────────────────────────
+
+[[provider]]
+id = "deepseek"
+name = "DeepSeek"
+endpoint = "https://api.deepseek.com/v1"
+api_compat = "openai"
+weight = 8
+models = [
+    { id = "deepseek-chat",      cost_in = 0.27,  cost_out = 1.10,  context_len = 128000 },
+    { id = "deepseek-reasoner",  cost_in = 0.55,  cost_out = 2.19,  context_len = 65536 },
+]
+
+# ─── Anthropic ───────────────────────────────────────────────────────
+
+[[provider]]
+id = "anthropic"
+name = "Anthropic"
+endpoint = "https://api.anthropic.com/v1"
+api_compat = "anthropic"
+weight = 9
+models = [
+    { id = "claude-sonnet-4-20250514",  cost_in = 3.00,  cost_out = 15.00, context_len = 200000 },
+    { id = "claude-haiku-4-20250514",   cost_in = 0.25,  cost_out = 1.25,  context_len = 200000 },
+]
+
+# ─── Google ──────────────────────────────────────────────────────────
+
+[[provider]]
+id = "google"
+name = "Google Gemini"
+endpoint = "https://generativelanguage.googleapis.com/v1beta"
+api_compat = "google"
+weight = 7
+models = [
+    { id = "gemini-2.5-pro",    cost_in = 1.25,  cost_out = 10.00, context_len = 1048576 },
+    { id = "gemini-2.5-flash",  cost_in = 0.15,  cost_out = 0.60,  context_len = 1048576 },
+]
+
+# ─── 竞速模式配置 ────────────────────────────────────────────────────
+
+[llm.race]
+candidates = [
+    "openai/gpt-4o-mini",
+    "deepseek/deepseek-chat",
+    "anthropic/claude-haiku-4-20250514",
+]
+strategy = "first_success"
+collect_all = false
+timeout_ms = 5000
+
+# ─── 智能路由配置 ────────────────────────────────────────────────────
+
+[llm.smart]
+strategy = "weighted"
+weights = { openai = 10, anthropic = 9, deepseek = 8, google = 7 }
+budget_per_hour = 5.0
+
+# ─── 凝蜕引擎配置 ────────────────────────────────────────────────────
+
+[llm.condenser]
+strategy = "hybrid"
+max_input_tokens = 4096
+preserve_system = true
+min_messages = 2

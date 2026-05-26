@@ -10,6 +10,9 @@ Responsibility Boundary (per V2.2 Architecture Decision):
 Performance Target: Race mode first response < 2s, Smart routing P99 < 3s
 """
 
+import logging
+
+logger = logging.getLogger(__name__)
 import asyncio
 import time
 import json
@@ -238,7 +241,7 @@ class ModelRouter:
 
         # All candidates failed - trigger fallback
         if self.config.fallback_strategy:
-            std.log.warn(f"Race all failed, falling back to {self.config.fallback_strategy.value}")
+            logger.warning("Race all failed, falling back to %s", self.config.fallback_strategy.value)
             # Create new request with fallback strategy
             fallback_config = RoutingConfig(
                 strategy=self.config.fallback_strategy,

@@ -4,15 +4,28 @@
  *           and /proc/self/mem protection.
  */
 
+/* Must define target arch BEFORE any BPF includes */
+#ifndef __TARGET_ARCH_x86
+#define __TARGET_ARCH_x86
+#endif
+
 #include <vmlinux.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
 
+/* Kernel constants that may not be in vmlinux.h for 6.6 */
+#ifndef EPERM
+#define EPERM       1
+#endif
+#ifndef MS_BIND
+#define MS_BIND     4096
+#endif
+
 #define LINGNET_MAGIC 0x4C4E4754  /* "LNGT" */
 #define MAX_PATH_LEN 256
 
-struct lsm_event {
+struct lsm_policy_event {
     u32 pid;
     u64 cgroup_id;
     int lsm_hook;
@@ -65,7 +78,7 @@ int BPF_PROG(lsm_file_open, struct file *file) {
     /* Get path from dentry */
     struct dentry *dentry = BPF_CORE_READ(file, f_path.dentry);
     struct qstr d_name = BPF_CORE_READ(dentry, d_name);
-    char *name = d_name.name;
+    const char *name = d_name.name;
 
     /* Simplified: check against whitelist hash */
     u64 hash = djb2_hash(name, d_name.len);
@@ -73,7 +86,7 @@ int BPF_PROG(lsm_file_open, struct file *file) {
         return 0;
 
     /* Deny and audit */
-    struct lsm_event e = {
+    struct lsm_policy_event e = {
         .pid = bpf_get_current_pid_tgid() >> 32,
         .cgroup_id = cgroup_id,
         .lsm_hook = 1, /* file_open */
@@ -109,7 +122,7 @@ int BPF_PROG(lsm_sb_mount, const char *dev_name, struct path *path,
 
     /* Deny bind mounts that could escape cgroup */
     if (flags & MS_BIND) {
-        struct lsm_event e = {
+        struct lsm_policy_event e = {
             .pid = bpf_get_current_pid_tgid() >> 32,
             .cgroup_id = cgroup_id,
             .lsm_hook = 3, /* sb_mount */

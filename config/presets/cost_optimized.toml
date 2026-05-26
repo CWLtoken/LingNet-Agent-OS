@@ -1,0 +1,58 @@
+# LingNet Agent OS V2.8 — Cost Optimized Preset
+# Strategy: cost-optimized — cheapest provider first
+
+[router]
+strategy = "cost_optimized"
+health_check_interval_s = 60.0
+failover_threshold = 0.5
+max_concurrent_requests = 50
+enable_metrics = true
+metrics_port = 9090
+
+[[provider]]
+name = "ollama"
+base_url = "http://localhost:11434"
+model = "llama3"
+priority = 1
+cost_per_1k_tokens = 0.0
+max_tokens = 8192
+
+[[provider]]
+name = "deepseek"
+base_url = "https://api.deepseek.com/v1"
+model = "deepseek-chat"
+priority = 2
+cost_per_1k_tokens = 0.0003
+max_tokens = 8192
+
+[[provider]]
+name = "groq"
+base_url = "https://api.groq.com/openai/v1"
+model = "llama-3.1-70b-versatile"
+priority = 3
+cost_per_1k_tokens = 0.0007
+max_tokens = 8192
+
+[[provider]]
+name = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+model = "auto"
+priority = 4
+cost_per_1k_tokens = 0.002
+max_tokens = 8192
+
+[[provider]]
+name = "anthropic"
+base_url = "https://api.anthropic.com/v1"
+model = "claude-sonnet-4-20250514"
+priority = 5
+cost_per_1k_tokens = 0.003
+max_tokens = 8192
+
+[[provider]]
+name = "openai"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o"
+priority = 6
+cost_per_1k_tokens = 0.005
+max_tokens = 4096
