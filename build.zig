@@ -190,6 +190,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // libsodium headers needed for @cImport in ed25519.zig (used by Translate-C)
+    ed25519_mod.linkSystemLibrary("sodium", .{});
     const l2_loader_mod = b.createModule(.{
         .root_source_file = b.path("src/l2_loader.zig"),
         .target = target,

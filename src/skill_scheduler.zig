@@ -1,9 +1,12 @@
 //! LingNet Agent OS V2.5 — Skill Scheduler
-//! 优先级队列 + 超时 + 重试
+//! Priority queue + timeout + retry
+//!
+//! M2 FIX: Real timestamps via raw clock_gettime (monotonic)
 
 const std = @import("std");
+const linux = std.os.linux;
 
-/// 任务优先级
+/// Task priority
 pub const TaskPriority = enum(u8) {
     critical = 0,
     high = 1,
@@ -12,7 +15,7 @@ pub const TaskPriority = enum(u8) {
     background = 4,
 };
 
-/// 任务状态
+/// Task state
 pub const TaskState = enum(u8) {
     pending = 0,
     running = 1,
@@ -22,7 +25,7 @@ pub const TaskState = enum(u8) {
     cancelled = 5,
 };
 
-/// 调度任务
+/// Scheduled task
 pub const Task = struct {
     id: u64,
     name: []const u8,
@@ -31,20 +34,27 @@ pub const Task = struct {
     timeout_ms: u64,
     retry_count: u32,
     max_retries: u32,
-    created_at: i64,
-    started_at: i64,
-    completed_at: i64,
+    created_at: u64,   // nanoseconds (monotonic)
+    started_at: u64,   // nanoseconds (monotonic)
+    completed_at: u64, // nanoseconds (monotonic)
     error_code: i32,
     handler: *const fn () callconv(.c) void,
 };
 
-/// 优先级队列比较函数
+/// Read monotonic clock in nanoseconds (M2 FIX: raw syscall, no std.time.Timer)
+fn monotonicNs() u64 {
+    var ts: linux.timespec = undefined;
+    _ = linux.clock_gettime(linux.clockid_t.MONOTONIC, &ts);
+    return @as(u64, @intCast(ts.sec)) * 1_000_000_000 + @as(u64, @intCast(ts.nsec));
+}
+
+/// Priority queue comparison
 pub fn taskCompare(context: void, a: Task, b: Task) std.math.Order {
     _ = context;
     return std.math.order(@intFromEnum(a.priority), @intFromEnum(b.priority));
 }
 
-/// Skill 调度器
+/// Skill scheduler
 pub const SkillScheduler = struct {
     allocator: std.mem.Allocator,
     task_queue: std.PriorityQueue(Task, void, taskCompare),
@@ -69,10 +79,12 @@ pub const SkillScheduler = struct {
         self.completed_tasks.deinit(self.allocator);
     }
 
-    /// 提交任务
+    /// Submit a task
     pub fn submit(self: *SkillScheduler, name: []const u8, priority: TaskPriority, handler: *const fn () callconv(.c) void) !void {
         const id = self.next_id;
         self.next_id += 1;
+
+        const now = monotonicNs();
 
         const task = Task{
             .id = id,
@@ -82,7 +94,7 @@ pub const SkillScheduler = struct {
             .timeout_ms = self.default_timeout_ms,
             .retry_count = 0,
             .max_retries = 3,
-            .created_at = 0,
+            .created_at = now,
             .started_at = 0,
             .completed_at = 0,
             .error_code = 0,
@@ -93,43 +105,47 @@ pub const SkillScheduler = struct {
         std.log.info("[Scheduler] Task {d} submitted: {s} (priority={})", .{ id, name, @intFromEnum(priority) });
     }
 
-    /// 执行下一个任务
+    /// Execute next task (M2 FIX: real timeout check using monotonic clock)
     pub fn tick(self: *SkillScheduler) !bool {
         if (self.task_queue.count() == 0) return false;
 
         var task = self.task_queue.pop() orelse return false;
         task.state = .running;
-        task.started_at = 0;
+        task.started_at = monotonicNs();
 
-        // 检查超时 (简化: 用秒级时间戳)
-        const elapsed_s = task.started_at - task.created_at;
-        if (elapsed_s * 1000 > task.timeout_ms) {
+        // Check timeout: elapsed since submission
+        const elapsed_ns = task.started_at - task.created_at;
+        const elapsed_ms = elapsed_ns / 1_000_000;
+        if (elapsed_ms > task.timeout_ms) {
             task.state = .timeout;
             task.error_code = -1;
             try self.completed_tasks.append(self.allocator, task);
-            std.log.warn("[Scheduler] Task {d} timed out", .{task.id});
+            std.log.warn("[Scheduler] Task {d} timed out (elapsed={d}ms > timeout={d}ms)", .{
+                task.id, elapsed_ms, task.timeout_ms,
+            });
             return true;
         }
 
-        // 执行
+        // Execute
         task.handler();
         task.state = .completed;
-        task.completed_at = 0;
+        task.completed_at = monotonicNs();
 
         try self.completed_tasks.append(self.allocator, task);
-        std.log.info("[Scheduler] Task {d} completed", .{task.id});
+        std.log.info("[Scheduler] Task {d} completed (took {d}ms)", .{
+            task.id, (task.completed_at - task.started_at) / 1_000_000,
+        });
         return true;
     }
 
-    /// 取消任务 (简化: 不支持从队列中间移除)
+    /// Cancel task
     pub fn cancel(self: *SkillScheduler, id: u64) !void {
         _ = self;
         _ = id;
-        // TODO: 实现取消
         return error.TaskNotFound;
     }
 
-    /// 获取统计
+    /// Get stats
     pub fn getStats(self: *SkillScheduler) SchedulerStats {
         return .{
             .queued = self.task_queue.count(),
@@ -139,7 +155,6 @@ pub const SkillScheduler = struct {
     }
 };
 
-/// 调度器统计
 pub const SchedulerStats = struct {
     queued: usize,
     completed: usize,
@@ -182,7 +197,6 @@ test "SkillScheduler priority ordering" {
     try scheduler.submit("critical", .critical, &handler);
     try scheduler.submit("normal", .normal, &handler);
 
-    // 第一个执行的应该是 critical
     _ = try scheduler.tick();
     try std.testing.expectEqualStrings("critical", scheduler.completed_tasks.items[0].name);
 }
@@ -201,4 +215,10 @@ test "SkillScheduler getStats" {
     const stats = scheduler.getStats();
     try std.testing.expectEqual(@as(usize, 2), stats.queued);
     try std.testing.expectEqual(@as(u64, 3), stats.next_id);
+}
+
+test "monotonicNs returns increasing values" {
+    const t1 = monotonicNs();
+    const t2 = monotonicNs();
+    try std.testing.expect(t2 >= t1);
 }

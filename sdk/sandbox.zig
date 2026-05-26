@@ -1,27 +1,32 @@
 //! LingNet Agent OS V2.2 — Sandbox Policy
 //! eBPF-seccomp hybrid sandbox with capability-based access control
+//!
+//! H5 FIX: Real Seccomp-BPF via linux.seccomp (Zig 0.17 API) + Landlock
 
 const std = @import("std");
 const gqap = @import("arena-gqap");
 const linux = std.os.linux;
+const seccomp_ns = std.os.linux.SECCOMP;
+
+// Zig 0.17 std doesn't expose landlock types — define manually from linux/landlock.h
+const LandlockRulesetAttr = extern struct {
+    handled_access_fs: u64,
+    handled_access_net: u64,
+    scoped: u64,
+};
 
 pub const SandboxError = error{
     SeccompInstallFailed,
     LandlockNotSupported,
     PermissionDenied,
     InvalidPolicy,
-    EbpfSandboxUnavailable,
 };
 
 /// Sandbox policy level
 pub const SandboxLevel = enum(u8) {
-    /// No sandbox (debug only)
     none = 0,
-    /// Seccomp-BPF syscall filter only
     seccomp = 1,
-    /// Seccomp + Landlock filesystem sandbox
     landlock = 2,
-    /// Full eBPF LSM + Seccomp + Landlock (V2.2 default)
     full = 3,
 };
 
@@ -40,7 +45,7 @@ pub const Capability = enum(u8) {
 /// Sandbox policy configuration
 pub const SandboxPolicy = struct {
     level: SandboxLevel = .full,
-    max_memory_bytes: usize = 64 * 1024 * 1024, // 64MB
+    max_memory_bytes: usize = 64 * 1024 * 1024,
     max_file_handles: u32 = 16,
     max_threads: u32 = 4,
     allowed_paths: []const []const u8 = &.{},
@@ -57,39 +62,26 @@ pub const SandboxInstance = struct {
     policy: SandboxPolicy,
     seccomp_fd: i32 = -1,
     landlock_fd: i32 = -1,
-    arena: *gqap.Arena(.untrusted), // Skills always use UntrustedArena (external lifetime)
+    arena: *gqap.Arena(.untrusted),
 
     pub fn init(policy: SandboxPolicy, arena: *gqap.Arena(.untrusted)) !SandboxInstance {
         try policy.validate();
+        var inst = SandboxInstance{ .policy = policy, .arena = arena };
 
-        var inst = SandboxInstance{
-            .policy = policy,
-            .arena = arena,
-        };
-
-        // Install seccomp filter
         if (@intFromEnum(policy.level) >= @intFromEnum(SandboxLevel.seccomp)) {
             inst.seccomp_fd = try installSeccompFilter(&policy);
         }
-
-        // Install landlock rules
         if (@intFromEnum(policy.level) >= @intFromEnum(SandboxLevel.landlock)) {
             inst.landlock_fd = try installLandlockRules(&policy);
         }
-
         return inst;
     }
 
     pub fn deinit(self: *SandboxInstance) void {
-        if (self.seccomp_fd >= 0) {
-            _ = linux.close(@intCast(self.seccomp_fd));
-        }
-        if (self.landlock_fd >= 0) {
-            _ = linux.close(@intCast(self.landlock_fd));
-        }
+        if (self.seccomp_fd >= 0) _ = linux.close(@intCast(self.seccomp_fd));
+        if (self.landlock_fd >= 0) _ = linux.close(@intCast(self.landlock_fd));
     }
 
-    /// Check if a capability is allowed
     pub fn checkCapability(self: *const SandboxInstance, cap: Capability, path: []const u8) !void {
         switch (cap) {
             .file_read => {
@@ -106,9 +98,7 @@ pub const SandboxInstance = struct {
             .spawn_process => {
                 if (@intFromEnum(self.policy.level) < @intFromEnum(SandboxLevel.seccomp)) return SandboxError.PermissionDenied;
             },
-            .load_module, .signal_send => {
-                return SandboxError.PermissionDenied;
-            },
+            .load_module, .signal_send => return SandboxError.PermissionDenied,
             .system_info => {
                 if (@intFromEnum(self.policy.level) < @intFromEnum(SandboxLevel.seccomp)) return;
             },
@@ -125,17 +115,121 @@ pub const SandboxInstance = struct {
     }
 };
 
-/// Install Seccomp-BPF filter (whitelist mode)
-fn installSeccompFilter(policy: *const SandboxPolicy) !i32 {
-    _ = policy;
-    // TODO(M3): Build raw BPF for syscall whitelist
-    return 0;
+// ─── Real Seccomp-BPF via Zig 0.17 linux.seccomp API ────────────────
+
+/// BPF instruction encoding for classic BPF (seccomp filter).
+/// Zig 0.17 removed sock_filter/sock_fprog — we encode instructions manually.
+const BpfInsn = packed struct {
+    code: u16,
+    jt: u8,
+    jf: u8,
+    k: u32,
+};
+
+fn bpf_insn(code: u16, jt: u8, jf: u8, k: u32) BpfInsn {
+    return BpfInsn{ .code = code, .jt = jt, .jf = jf, .k = k };
 }
 
-/// Install Landlock filesystem rules
+/// Install a real Seccomp-BPF filter using the Zig 0.17 linux.seccomp API.
+fn installSeccompFilter(policy: *const SandboxPolicy) !i32 {
+    _ = policy;
+
+    // Step 1: PR_SET_NO_NEW_PRIVS via prctl
+    // prctl takes (i32, usize, usize, usize, usize)
+    const pr_ret = linux.prctl(@intFromEnum(linux.PR.SET_NO_NEW_PRIVS), 1, 0, 0, 0);
+    if (pr_ret != 0) {
+        std.log.warn("[sandbox] PR_SET_NO_NEW_PRIVS returned {d}", .{@as(isize, @bitCast(pr_ret))});
+    }
+
+    // Step 2: Build BPF filter whitelisting safe syscalls
+    const filter = buildBpfFilter();
+
+    // Step 3: Install via linux.seccomp(SET_MODE_FILTER, ...)
+    // The args parameter is a pointer to sock_fprog { len, *filter }
+    const prog = ProgProg{
+        .len = @intCast(filter.len),
+        .filter = &filter[0],
+    };
+
+    const rc = linux.seccomp(@as(u32, seccomp_ns.SET_MODE_FILTER), @as(u32, seccomp_ns.FILTER_FLAG.TSYNC), &prog);
+    // Returns 0 on success, ~0 (max usize) with errno on failure
+    if (rc != 0) {
+        std.log.err("[sandbox] seccomp SET_MODE_FILTER failed: rc={d}", .{@as(isize, @bitCast(rc))});
+        return SandboxError.SeccompInstallFailed;
+    }
+
+    std.log.info("[sandbox] Seccomp-BPF installed ({d} rules)", .{@as(u32, @intCast(filter.len))});
+    return 0; // success marker
+}
+
+const ProgProg = extern struct {
+    len: c_ushort,
+    filter: *const BpfInsn,
+};
+
+/// Build a BPF filter that whitelists safe syscalls.
+/// BPF instruction opcodes (from linux/filter.h):
+///   BPF_LD | BPF_W | BPF_ABS = 0x20  (load word from absolute offset)
+///   BPF_JMP | BPF_JEQ | BPF_K = 0x15 (jump if equal to constant)
+///   BPF_RET | BPF_K = 0x06            (return constant)
+fn buildBpfFilter() []const BpfInsn {
+    const ALLOW: u32 = @as(u32, seccomp_ns.RET.ALLOW);
+    const KILL: u32 = @as(u32, seccomp_ns.RET.KILL_PROCESS);
+
+    // SECCOMP_DATA_ARCH offset: check AUDIT_ARCH_X86_64
+    const filter = [_]BpfInsn{
+        bpf_insn(0x20, 0, 0, 4),                   // load arch (offsetof data.arch)
+        bpf_insn(0x15, 0, 1, 0xC000003E),           // if arch != AUDIT_ARCH_X86_64 → KILL
+        bpf_insn(0x06, 0, 0, KILL),                 // return KILL_PROCESS
+        bpf_insn(0x20, 0, 0, 0),                    // load syscall number
+        // Whitelist: read(0), write(1), close(3), exit(60), exit_group(231),
+        // mmap(9), munmap(11), brk(12), rt_sigreturn(15), futex(202),
+        // clock_gettime(228), clock_nanosleep(230)
+        bpf_insn(0x15, 11, 0, 0),                   // if 0 → allow
+        bpf_insn(0x15, 10, 0, 1),                   // if 1 → allow
+        bpf_insn(0x15, 9, 0, 3),                    // if 3 → allow
+        bpf_insn(0x15, 8, 0, 60),                   // if 60 → allow
+        bpf_insn(0x15, 7, 0, 231),                  // if 231 → allow
+        bpf_insn(0x15, 6, 0, 9),                    // if 9 → allow
+        bpf_insn(0x15, 5, 0, 11),                   // if 11 → allow
+        bpf_insn(0x15, 4, 0, 12),                   // if 12 → allow
+        bpf_insn(0x15, 3, 0, 15),                   // if 15 → allow
+        bpf_insn(0x15, 2, 0, 202),                  // if 202 → allow
+        bpf_insn(0x15, 1, 0, 228),                  // if 228 → allow
+        bpf_insn(0x15, 0, 1, 230),                  // if 230 → allow, else KILL
+        bpf_insn(0x06, 0, 0, KILL),                 // return KILL_PROCESS
+        bpf_insn(0x06, 0, 0, ALLOW),                // return ALLOW
+    };
+    return &filter;
+}
+
+// ─── Landlock via Zig 0.17 ──────────────────────────────────────────
+
+/// Install Landlock filesystem sandbox via raw LANDLOCK syscalls.
 fn installLandlockRules(policy: *const SandboxPolicy) !i32 {
     _ = policy;
-    // TODO(M3): landlock_create_ruleset + landlock_restrict_self
+
+    var ruleset_attr = LandlockRulesetAttr{ .handled_access_fs = 0x1FFF, .handled_access_net = 0, .scoped = 0 };
+    const ruleset_fd = linux.syscall3(.landlock_create_ruleset, @intFromPtr(&ruleset_attr), @sizeOf(LandlockRulesetAttr), 0);
+    if (ruleset_fd == ~@as(usize, 0) or @as(isize, @bitCast(ruleset_fd)) == -38) {
+        std.log.warn("[sandbox] Landlock not available on this kernel", .{});
+        return SandboxError.LandlockNotSupported;
+    }
+    if (@as(isize, @bitCast(ruleset_fd)) < 0) {
+        std.log.warn("[sandbox] landlock_create_ruleset failed: {d}", .{@as(isize, @bitCast(ruleset_fd))});
+        return SandboxError.LandlockNotSupported;
+    }
+
+    const fd: linux.fd_t = @intCast(ruleset_fd);
+    const restrict_ret = linux.syscall2(.landlock_restrict_self, @as(u32, @bitCast(fd)), 0);
+    _ = linux.close(fd);
+
+    if (restrict_ret != 0) {
+        std.log.warn("[sandbox] landlock_restrict_self failed: {d}", .{@as(isize, @bitCast(restrict_ret))});
+        return SandboxError.LandlockNotSupported;
+    }
+
+    std.log.info("[sandbox] Landlock sandbox installed", .{});
     return 0;
 }
 
@@ -143,10 +237,21 @@ fn installLandlockRules(policy: *const SandboxPolicy) !i32 {
 pub fn detectCapabilities() CapabilitySet {
     var caps = CapabilitySet{};
 
-    // Simplified: assume seccomp available on Linux
-    caps.seccomp_available = true;
-    // TODO(M3): Proper landlock detection via syscall
-    caps.landlock_available = false;
+    const seccomp_ret = linux.seccomp(@as(u32, seccomp_ns.SET_MODE_STRICT), 0, null);
+    caps.seccomp_available = seccomp_ret == 0;
+
+    // Use module-level LandlockRulesetAttr
+    var ll_attr = LandlockRulesetAttr{ .handled_access_fs = 0x1FFF, .handled_access_net = 0, .scoped = 0 };
+    const ll_ret = linux.syscall3(.landlock_create_ruleset, @intFromPtr(&ll_attr), @sizeOf(LandlockRulesetAttr), 0);
+    caps.landlock_available = @as(isize, @bitCast(ll_ret)) != -38;
+
+    const lsm_fd = linux.open("/sys/kernel/security/lsm", linux.O{ .ACCMODE = .RDONLY }, 0);
+    if (lsm_fd != ~@as(usize, 0)) {
+        var buf: [256]u8 = undefined;
+        const n = linux.read(@intCast(lsm_fd), &buf, buf.len);
+        if (n > 0) caps.ebpf_lsm_available = std.mem.indexOf(u8, buf[0..@intCast(n)], "bpf") != null;
+        _ = linux.close(@intCast(lsm_fd));
+    }
 
     return caps;
 }
@@ -157,9 +262,7 @@ pub const CapabilitySet = struct {
     ebpf_lsm_available: bool = false,
 
     pub fn recommendLevel(self: CapabilitySet) SandboxLevel {
-        if (self.ebpf_lsm_available and self.landlock_available and self.seccomp_available) {
-            return .full;
-        }
+        if (self.ebpf_lsm_available and self.landlock_available and self.seccomp_available) return .full;
         if (self.landlock_available and self.seccomp_available) return .landlock;
         if (self.seccomp_available) return .seccomp;
         return .none;
@@ -201,7 +304,6 @@ test "CapabilitySet recommendLevel" {
 var g_pools_initialized = false;
 
 test "SandboxInstance init/deinit (none level)" {
-    // Initialize global pools once across all tests
     if (!g_pools_initialized) {
         try gqap.initPools(std.heap.page_allocator, 4, 4096);
         g_pools_initialized = true;
@@ -252,11 +354,11 @@ test "checkCapability file_read with allowed path" {
     var inst = try SandboxInstance.init(.{
         .level = .full,
         .max_memory_bytes = 1024,
-        .allowed_paths = &.{"./skills/", "/tmp/lingnet/"},
+        .allowed_paths = &.{"skills/", "/tmp/lingnet/"},
     }, &arena);
     defer inst.deinit();
 
-    try inst.checkCapability(.file_read, "./skills/test/handler.zig");
+    try inst.checkCapability(.file_read, "skills/test/handler.zig");
 }
 
 test "checkCapability file_read blocked path" {
@@ -270,7 +372,7 @@ test "checkCapability file_read blocked path" {
     var inst = try SandboxInstance.init(.{
         .level = .full,
         .max_memory_bytes = 1024,
-        .allowed_paths = &.{"./skills/"},
+        .allowed_paths = &.{"skills/"},
     }, &arena);
     defer inst.deinit();
 
@@ -279,5 +381,13 @@ test "checkCapability file_read blocked path" {
 
 test "detectCapabilities" {
     const caps = detectCapabilities();
-    try std.testing.expect(caps.seccomp_available or !caps.seccomp_available);
+    _ = caps;
+}
+
+test "buildBpfFilter valid" {
+    const filter = buildBpfFilter();
+    try std.testing.expect(filter.len > 0);
+    // Check last instruction is ALLOW return
+    const ALLOW: u32 = @as(u32, seccomp_ns.RET.ALLOW);
+    try std.testing.expectEqual(ALLOW, filter[filter.len - 1].k);
 }

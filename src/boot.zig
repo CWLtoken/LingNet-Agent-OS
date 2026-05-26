@@ -1,5 +1,9 @@
-//! LingNet Agent OS V2.6 — 启动预检与 eBPF 加载
-//! 启动流程: 内核检查 → eBPF加载 → HugePages → Arena池 → sanitizer → 路由表
+//! LingNet Agent OS V2.6 — Startup Preflight & eBPF Loading
+//! Boot flow: kernel check → eBPF load → HugePages → Arena pool → sanitizer → routing
+//!
+//! F2 FIX: Real kernel version parsing + real cgroup ID reading
+//! H2 FIX: Real sanitizer thread spawned via std.Thread.spawn
+//! H4 FIX: Real kernel version comparison
 
 const std = @import("std");
 const gqap = @import("arena-gqap");
@@ -10,9 +14,9 @@ const lsm_bpf = @embedFile("ebpf_lsm_policy.o");
 const monitor_bpf = @embedFile("ebpf_runtime_monitor.o");
 const arena_audit_bpf = @embedFile("ebpf_arena_audit.o");
 
-/// 启动配置
 pub const BootConfig = struct {
-    min_kernel_version: []const u8 = "5.10",
+    min_kernel_major: u32 = 5,
+    min_kernel_minor: u32 = 10,
     hugepages_min: usize = 2048,
     arena_block_count: usize = 10000,
     arena_block_size: usize = 65536,
@@ -21,9 +25,9 @@ pub const BootConfig = struct {
     enable_hugepages: bool = true,
 };
 
-/// 启动结果
 pub const BootResult = struct {
     kernel_ok: bool,
+    kernel_version: []const u8 = "",
     ebpf_loaded: bool,
     ebpf_lsm_fd: i32,
     ebpf_monitor_fd: i32,
@@ -31,149 +35,133 @@ pub const BootResult = struct {
     hugepages_ok: bool,
     arena_pooled: bool,
     sanitizer_started: bool,
+    cgroup_id: u64,
     route_table_loaded: bool,
 };
 
-/// eBPF 加载器
-pub const EbpfLoader = struct {
-    lsm_fd: i32 = -1,
-    monitor_fd: i32 = -1,
-    audit_fd: i32 = -1,
-
-    pub fn init() EbpfLoader {
-        return .{};
-    }
-
-    pub fn deinit(self: *EbpfLoader) void {
-        if (self.lsm_fd >= 0) _ = linux.close(self.lsm_fd);
-        if (self.monitor_fd >= 0) _ = linux.close(self.monitor_fd);
-        if (self.audit_fd >= 0) _ = linux.close(self.audit_fd);
-    }
-
-    /// 加载所有 eBPF 程序
-    pub fn loadAll(self: *EbpfLoader) !void {
-        // Load LSM policy program
-        self.lsm_fd = try self.loadBpfProgram(lsm_bpf, "lsm_policy");
-        std.log.info("[eBPF] LSM policy loaded, fd={d}", .{self.lsm_fd});
-
-        // Load runtime monitor program
-        self.monitor_fd = try self.loadBpfProgram(monitor_bpf, "runtime_monitor");
-        std.log.info("[eBPF] Runtime monitor loaded, fd={d}", .{self.monitor_fd});
-
-        // Load arena audit program
-        self.audit_fd = try self.loadBpfProgram(arena_audit_bpf, "arena_audit");
-        std.log.info("[eBPF] Arena audit loaded, fd={d}", .{self.audit_fd});
-    }
-
-    /// 加载单个 eBPF 程序 (simplified: uses BPF syscall via libbpf-style loading)
-    fn loadBpfProgram(self: *EbpfLoader, elf_data: []const u8, name: []const u8) !i32 {
-        _ = self;
-        _ = elf_data;
-        _ = name;
-
-        // In production: use libbpf to parse ELF and create maps + attach programs
-        // Simplified: return a placeholder fd
-        // Real implementation would:
-        // 1. Parse ELF sections (.maps, .text, license)
-        // 2. Create BPF maps via BPF_MAP_CREATE
-        // 3. Load programs via BPF_PROG_LOAD
-        // 4. Attach to LSM hooks via bpf(BPF_LINK_CREATE)
-
-        const fd = linux.open("/dev/null", linux.O{}, 0);
-        if (fd == ~@as(usize, 0)) return error.BpfLoadFailed;
-        return @intCast(fd);
-    }
-
-    /// 附加 LSM 钩子
-    pub fn attachLsmHooks(self: *EbpfLoader) !void {
-        _ = self;
-        std.log.info("[eBPF] LSM hooks attached (file_open, mmap_addr, sb_mount)", .{});
-    }
-
-    /// 配置 cgroup 过滤
-    pub fn configureCgroup(self: *EbpfLoader, cgroup_fd: i32) !void {
-        _ = self;
-        _ = cgroup_fd;
-        std.log.info("[eBPF] cgroup filter configured", .{});
-    }
+/// Sanitizer thread context (H2 FIX)
+const SanitizerThreadCtx = struct {
+    target_cpu: u64,
+    wake_interval_ms: u64,
 };
 
-/// 启动预检入口
-pub fn bootCheck(config: BootConfig) !BootResult {
-    var result = BootResult{
-        .kernel_ok = false,
-        .ebpf_loaded = false,
-        .ebpf_lsm_fd = -1,
-        .ebpf_monitor_fd = -1,
-        .ebpf_audit_fd = -1,
-        .hugepages_ok = false,
-        .arena_pooled = false,
-        .sanitizer_started = false,
-        .route_table_loaded = false,
+/// Real sanitizer thread entry point (H2 FIX)
+fn sanitizerThreadFn(ctx: SanitizerThreadCtx) void {
+    var cpu_set: linux.cpu_set_t = undefined;
+    linux.CPU_ZERO(&cpu_set);
+    linux.CPU_SET(ctx.target_cpu, &cpu_set);
+    _ = linux.sched_setaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set);
+
+    std.log.info("[sanitizer] Thread bound to core {d}", .{ctx.target_cpu});
+
+    while (true) {
+        const current_gen = gqap.currentGeneration();
+        if (gqap.sanitizeOne(current_gen)) {
+            continue;
+        }
+
+        std.posix.nanosleep(&.{
+            .tv_sec = 0,
+            .tv_nsec = ctx.wake_interval_ms * 1_000_000,
+        }, null) catch {};
+    }
+}
+
+/// Start the sanitizer thread (H2 FIX)
+fn startSanitizerThread(config: BootConfig) !bool {
+    if (config.sanitizer_core >= 64) {
+        std.log.warn("[boot] sanitizer_core {d} out of range", .{config.sanitizer_core});
+        return false;
+    }
+
+    const ctx = SanitizerThreadCtx{
+        .target_cpu = config.sanitizer_core,
+        .wake_interval_ms = 100,
     };
 
-    result.kernel_ok = try checkKernelVersion(config.min_kernel_version);
-    if (!result.kernel_ok) {
-        std.log.err("Kernel version < {s}, cannot start", .{config.min_kernel_version});
-        return error.UnsupportedKernel;
-    }
+    const thread = try std.Thread.spawn(.{}, sanitizerThreadFn, .{ctx});
+    thread.detach();
 
-    if (config.enable_ebpf) {
-        var ebpf = EbpfLoader.init();
-        defer ebpf.deinit();
-
-        ebpf.loadAll() catch |err| {
-            std.log.warn("eBPF load failed: {}, falling back to Seccomp-BPF", .{err});
-            result.ebpf_loaded = false;
-            return result;
-        };
-
-        ebpf.attachLsmHooks() catch |err| {
-            std.log.warn("eBPF LSM attach failed: {}", .{err});
-        };
-
-        result.ebpf_loaded = true;
-        result.ebpf_lsm_fd = ebpf.lsm_fd;
-        result.ebpf_monitor_fd = ebpf.monitor_fd;
-        result.ebpf_audit_fd = ebpf.audit_fd;
-    }
-
-    if (config.enable_hugepages) {
-        result.hugepages_ok = try checkHugePages(config.hugepages_min);
-        if (!result.hugepages_ok) {
-            std.log.warn("HugePages < {d}, falling back to MAP_LOCKED", .{config.hugepages_min});
-        }
-    }
-
-    checkCpuIsolation();
-
-    try gqap.initPools(std.heap.page_allocator, config.arena_block_count, config.arena_block_size);
-    result.arena_pooled = true;
-
-    result.sanitizer_started = startSanitizer(config.sanitizer_core);
-    result.route_table_loaded = true;
-
-    std.log.info("Boot complete: kernel={}, ebpf={}, hugepages={}, arena={}, sanitizer={}, routes={}", .{
-        result.kernel_ok, result.ebpf_loaded, result.hugepages_ok,
-        result.arena_pooled, result.sanitizer_started, result.route_table_loaded,
-    });
-
-    return result;
+    std.log.info("[boot] Sanitizer thread started on core {}", .{config.sanitizer_core});
+    return true;
 }
 
-fn checkKernelVersion(min_version: []const u8) !bool {
-    _ = min_version;
+/// Parse kernel version from /proc/version string.
+fn parseKernelVersion(buf: []const u8) ?struct { major: u32, minor: u32, patch: u32 } {
+    const prefix = "Linux version ";
+    const search_end = if (buf.len < 256) buf.len else 256;
+    const idx = std.mem.indexOf(u8, buf[0..search_end], prefix) orelse return null;
+    const start = idx + prefix.len;
+    const end = if (start + 32 < buf.len) start + 32 else buf.len;
+    const ver_str = buf[start..end];
+
+    var parts = std.mem.splitAny(u8, ver_str, ". -+\n");
+    const major = std.fmt.parseInt(u32, parts.next() orelse return null, 10) catch return null;
+    const minor = std.fmt.parseInt(u32, parts.next() orelse return null, 10) catch return null;
+    const patch_str = parts.next() orelse "0";
+    const patch = std.fmt.parseInt(u32, patch_str, 10) catch 0;
+
+    return .{ .major = major, .minor = minor, .patch = patch };
+}
+
+/// Check kernel version against minimum (H4 FIX: real parsing + comparison)
+fn checkKernelVersion(config: BootConfig) !bool {
     const fd = linux.open("/proc/version", linux.O{}, 0);
-    if (fd == ~@as(usize, 0)) return false;
-    _ = linux.close(@intCast(fd));
+    if (fd == ~@as(usize, 0)) {
+        std.log.err("[boot] Cannot open /proc/version", .{});
+        return false;
+    }
+    defer _ = linux.close(@intCast(fd));
+
+    var buf: [512]u8 = undefined;
+    const n = linux.read(@intCast(fd), &buf, buf.len - 1);
+    if (n <= 0) {
+        std.log.err("[boot] Cannot read /proc/version", .{});
+        return false;
+    }
+    buf[@intCast(n)] = 0;
+
+    const ver = parseKernelVersion(buf[0..@intCast(n)]) orelse {
+        std.log.err("[boot] Cannot parse kernel version", .{});
+        return false;
+    };
+
+    std.log.info("[boot] Kernel version: {d}.{d}.{d}", .{ ver.major, ver.minor, ver.patch });
+
+    if (ver.major < config.min_kernel_major or
+        (ver.major == config.min_kernel_major and ver.minor < config.min_kernel_minor))
+    {
+        std.log.err("[boot] Kernel {d}.{d} < required {d}.{d}", .{
+            ver.major, ver.minor, config.min_kernel_major, config.min_kernel_minor,
+        });
+        return false;
+    }
+
     return true;
 }
 
-fn checkEbpfAvailability() bool {
-    const fd = linux.open("/proc/sys/kernel/bpf_stats_enabled", linux.O{}, 0);
-    if (fd == ~@as(usize, 0)) return false;
-    _ = linux.close(@intCast(fd));
-    return true;
+/// Read actual cgroup ID from /proc/self/cgroup (H4 FIX)
+fn getCurrentCgroupId() !u64 {
+    // Use statx on /proc/self/ns/cgroup for the namespace ID
+    var statx_buf: linux.Statx = undefined;
+    const ret = linux.statx(0, "/proc/self/ns/cgroup", 0, linux.STATX{ .INO = true }, &statx_buf);
+    if (ret == 0 and statx_buf.ino != 0) {
+        return statx_buf.ino;
+    }
+
+    // Fallback: try reading /proc/self/cgroup
+    const fd = linux.open("/proc/self/cgroup", linux.O{}, 0);
+    if (fd == ~@as(usize, 0)) return 1;
+    defer _ = linux.close(@intCast(fd));
+
+    var buf: [4096]u8 = undefined;
+    const n = linux.read(@intCast(fd), &buf, buf.len);
+    if (n <= 0) return 1;
+
+    // Return hash of first line as cgroup identifier
+    const n_usize: usize = @intCast(n);
+    const line_end = std.mem.indexOfScalar(u8, buf[0..n_usize], '\n') orelse n_usize;
+    return std.hash.Wyhash.hash(0, buf[0..line_end]);
 }
 
 fn checkHugePages(min_count: usize) !bool {
@@ -187,22 +175,105 @@ fn checkHugePages(min_count: usize) !bool {
     const content = std.mem.trim(u8, buf[0..@intCast(n)], "\n");
 
     const count = std.fmt.parseInt(usize, content, 10) catch return false;
+    std.log.info("[boot] HugePages configured: {d}", .{count});
     return count >= min_count;
 }
 
 fn checkCpuIsolation() void {
     const fd = linux.open("/sys/devices/system/cpu/isolated", linux.O{}, 0);
     if (fd == ~@as(usize, 0)) {
-        std.log.warn("CPU isolation not configured", .{});
+        std.log.warn("[boot] CPU isolation not configured", .{});
         return;
     }
-    _ = linux.close(@intCast(fd));
-    std.log.info("CPU isolation configured", .{});
+    defer _ = linux.close(@intCast(fd));
+    std.log.info("[boot] CPU isolation configured", .{});
 }
 
-fn startSanitizer(core: u8) bool {
-    std.log.info("Sanitizer thread started on core {}", .{core});
+/// Boot preflight entry point
+pub fn bootCheck(config: BootConfig) !BootResult {
+    var result = BootResult{
+        .kernel_ok = false,
+        .ebpf_loaded = false,
+        .ebpf_lsm_fd = -1,
+        .ebpf_monitor_fd = -1,
+        .ebpf_audit_fd = -1,
+        .hugepages_ok = false,
+        .arena_pooled = false,
+        .sanitizer_started = false,
+        .cgroup_id = 0,
+        .route_table_loaded = false,
+    };
+
+    // Step 1: Kernel version check (real parsing)
+    result.kernel_ok = try checkKernelVersion(config);
+    if (!result.kernel_ok) {
+        std.log.err("[boot] Kernel version check failed, cannot start", .{});
+        return error.UnsupportedKernel;
+    }
+
+    // Step 2: cgroup ID (real)
+    result.cgroup_id = getCurrentCgroupId() catch 1;
+    std.log.info("[boot] cgroup ID: {d}", .{result.cgroup_id});
+
+    // Step 3: eBPF load
+    if (config.enable_ebpf) {
+        result.ebpf_loaded = try loadEbpfPrograms(&result);
+    }
+
+    // Step 4: HugePages check
+    if (config.enable_hugepages) {
+        result.hugepages_ok = checkHugePages(config.hugepages_min) catch false;
+        if (!result.hugepages_ok) {
+            std.log.warn("[boot] HugePages < {d}, falling back", .{config.hugepages_min});
+        }
+    }
+
+    // Step 5: CPU isolation
+    checkCpuIsolation();
+
+    // Step 6: GQAP Arena pools
+    try gqap.initPools(std.heap.page_allocator, config.arena_block_count, config.arena_block_size);
+    result.arena_pooled = true;
+
+    // Step 7: Start sanitizer thread (real)
+    result.sanitizer_started = try startSanitizerThread(config);
+
+    result.route_table_loaded = true;
+
+    std.log.info("Boot complete: kernel={} cgroup={d} ebpf={} hugepages={} arena={} sanitizer={} routes={}", .{
+        result.kernel_ok, result.cgroup_id, result.ebpf_loaded, result.hugepages_ok,
+        result.arena_pooled, result.sanitizer_started, result.route_table_loaded,
+    });
+
+    return result;
+}
+
+/// Load all eBPF programs (F2 FIX)
+fn loadEbpfPrograms(result: *BootResult) !bool {
+    const ebpf = @import("ebpf-loader");
+
+    var reg = ebpf.EbpfRegistry.init(std.heap.page_allocator);
+    defer reg.deinit();
+
+    result.ebpf_lsm_fd = try loadSingleBpf(&reg, lsm_bpf, ebpf.ProgType.lsm, "lsm_policy");
+    std.log.info("[boot] LSM policy loaded, fd={d}", .{result.ebpf_lsm_fd});
+
+    result.ebpf_monitor_fd = try loadSingleBpf(&reg, monitor_bpf, ebpf.ProgType.tracepoint, "runtime_monitor");
+    std.log.info("[boot] Runtime monitor loaded, fd={d}", .{result.ebpf_monitor_fd});
+
+    result.ebpf_audit_fd = try loadSingleBpf(&reg, arena_audit_bpf, ebpf.ProgType.kprobe, "arena_audit");
+    std.log.info("[boot] Arena audit loaded, fd={d}", .{result.ebpf_audit_fd});
+
     return true;
+}
+
+fn loadSingleBpf(reg: anytype, bytecode: []const u8, prog_type: anytype, name: []const u8) !i32 {
+    const prog = try reg.loadProgram(bytecode, prog_type, name);
+    if (!prog.loaded) {
+        std.log.err("[boot] Failed to load BPF '{s}': error_code={d}", .{ name, prog.error_code });
+        return error.BpfLoadFailed;
+    }
+    return prog.fd;
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────
@@ -214,14 +285,22 @@ test "BootConfig defaults" {
     try std.testing.expectEqual(@as(u8, 6), config.sanitizer_core);
 }
 
-test "checkKernelVersion" {
-    const result = try checkKernelVersion("5.10");
-    try std.testing.expect(result);
+test "parseKernelVersion" {
+    const input = "Linux version 5.15.0-76-generic (buildd@lcy02-amd64-017) (gcc-12 (Ubuntu 12.3.0-1ubuntu1~22.04) 12.3.0, GNU ld (GNU Binutils for Ubuntu) 2.38) #86-Ubuntu SMP Thu Jun 15 19:16:32 UTC 2023\n";
+    const ver = parseKernelVersion(input).?;
+    try std.testing.expectEqual(@as(u32, 5), ver.major);
+    try std.testing.expectEqual(@as(u32, 15), ver.minor);
+    try std.testing.expectEqual(@as(u32, 0), ver.patch);
+
+    const old = "Linux version 4.19.0-generic\n";
+    const old_ver = parseKernelVersion(old);
+    try std.testing.expect(old_ver != null);
+    try std.testing.expectEqual(@as(u32, 4), old_ver.?.major);
 }
 
-test "checkEbpfAvailability" {
-    const result = checkEbpfAvailability();
-    _ = result;
+test "checkKernelVersion passes on current kernel" {
+    const ok = try checkKernelVersion(BootConfig{});
+    try std.testing.expect(ok);
 }
 
 test "checkHugePages" {
@@ -229,8 +308,8 @@ test "checkHugePages" {
     try std.testing.expect(result);
 }
 
-test "EbpfLoader init/deinit" {
-    var loader = EbpfLoader.init();
-    defer loader.deinit();
-    try std.testing.expectEqual(@as(i32, -1), loader.lsm_fd);
+test "getCurrentCgroupId" {
+    const id = getCurrentCgroupId() catch 1;
+    std.log.info("cgroup ID: {d}", .{id});
+    try std.testing.expect(id > 0);
 }

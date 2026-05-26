@@ -1,8 +1,9 @@
-//! LingNet Agent OS V2.2 — eBPF Loader
-//! Integrates: BPF bytecode loading, cgroup registration, kernel version check
-//! M1: Replaces libnl-dependent loader with Zig 0.17 native implementation
+//! LingNet Agent OS V2.2 — eBPF Loader (rewritten for Zig 0.17)
+//! Real BPF_PROG_LOAD via bpf_ns.ProgLoadAttr + verifier log capture
 
 const std = @import("std");
+const linux = std.os.linux;
+const bpf_ns = std.os.linux.BPF;
 
 pub const EbpfError = error{
     BpfSyscallFailed,
@@ -13,14 +14,14 @@ pub const EbpfError = error{
     KernelNotSupported,
 };
 
-const MapType = enum(u32) {
+pub const MapType = enum(u32) {
     hash = 1,
     array = 2,
     prog_array = 3,
     perf_event_array = 4,
 };
 
-const ProgType = enum(u32) {
+pub const ProgType = enum(u32) {
     kprobe = 2,
     tracepoint = 5,
     xdp = 6,
@@ -35,7 +36,7 @@ pub const BpfProgram = struct {
 
     pub fn detach(self: *BpfProgram) void {
         if (self.fd >= 0) {
-            _ = std.os.linux.close(@intCast(self.fd));
+            _ = linux.close(@intCast(self.fd));
             self.fd = -1;
         }
     }
@@ -48,31 +49,31 @@ pub const BpfMap = struct {
     value_size: u32,
     max_entries: u32,
 
-    pub fn update(self: *BpfMap, gpa: std.mem.Allocator, key: []const u8, value: []const u8, flags: u64) !void {
-        _ = gpa;
-        const attr = std.os.linux.bpf_attr{
+    pub fn update(self: *BpfMap, _: std.mem.Allocator, key: []const u8, value: []const u8, flags: u64) !void {
+        const attr = bpf_ns.MapElemAttr{
             .map_fd = @intCast(self.fd),
             .key = @intFromPtr(key.ptr),
             .value = @intFromPtr(value.ptr),
             .flags = flags,
         };
-        const ret = std.os.linux.bpf(.map_update_elem, &attr, @sizeOf(std.os.linux.bpf_attr));
+        const ret = linux.bpf(.map_update_elem, &attr, @sizeOf(bpf_ns.MapElemAttr));
         if (ret < 0) return EbpfError.BpfSyscallFailed;
     }
 
     pub fn lookup(self: *BpfMap, key: []const u8, value: []u8) !void {
-        const attr = std.os.linux.bpf_attr{
+        const attr = bpf_ns.MapElemAttr{
             .map_fd = @intCast(self.fd),
             .key = @intFromPtr(key.ptr),
             .value = @intFromPtr(value.ptr),
+            .flags = 0,
         };
-        const ret = std.os.linux.bpf(.map_lookup_elem, &attr, @sizeOf(std.os.linux.bpf_attr));
+        const ret = linux.bpf(.map_lookup_elem, &attr, @sizeOf(bpf_ns.MapElemAttr));
         if (ret < 0) return EbpfError.BpfSyscallFailed;
     }
 
     pub fn close(self: *BpfMap) void {
         if (self.fd >= 0) {
-            _ = std.os.linux.close(@intCast(self.fd));
+            _ = linux.close(@intCast(self.fd));
             self.fd = -1;
         }
     }
@@ -88,11 +89,10 @@ pub const EbpfRegistry = struct {
     progs: std.ArrayList(BpfProgram),
 
     pub fn init(gpa: std.mem.Allocator) EbpfRegistry {
-        const progs: std.ArrayList(BpfProgram) = .empty;
         return .{
             .gpa = gpa,
             .maps = std.StringHashMap(BpfMap).init(gpa),
-            .progs = progs,
+            .progs = std.ArrayList(BpfProgram).empty,
         };
     }
 
@@ -114,19 +114,20 @@ pub const EbpfRegistry = struct {
         }
         var log_buf: [65536]u8 = undefined;
         @memset(&log_buf, 0);
-        const attr = std.os.linux.bpf_attr{
-            .prog_type = @intFromEnum(prog_type),
-            .insn_cnt = @intCast(bytecode.len / @sizeOf(std.os.linux.bpf_insn)),
-            .insns = @intFromPtr(bytecode.ptr),
-            .license = @intFromPtr("GPL".ptr),
-            .log_level = 1,
-            .log_size = log_buf.len,
-            .log_buf = @intFromPtr(&log_buf),
-            .kern_version = 0,
-        };
-        const fd = std.os.linux.bpf(.prog_load, &attr, @sizeOf(std.os.linux.bpf_attr));
+
+        const log_size: u32 = @intCast(log_buf.len);
+        var attr = std.mem.zeroes(bpf_ns.ProgLoadAttr);
+        attr.prog_type = @intFromEnum(prog_type);
+        attr.insn_cnt = @intCast(bytecode.len / 8); // bpf_insn = 8 bytes
+        attr.insns = @intFromPtr(bytecode.ptr);
+        attr.license = @intFromPtr("GPL".ptr);
+        attr.log_level = 1;
+        attr.log_size = log_size;
+        attr.log_buf = @intFromPtr(&log_buf);
+
+        const fd = linux.bpf(.prog_load, &attr, @sizeOf(bpf_ns.ProgLoadAttr));
         if (fd < 0) {
-            std.log.err("fail: {s}", .{std.mem.sliceTo(&log_buf, 0)});
+            std.log.err("BPF load fail '{s}': {s}", .{ name, std.mem.sliceTo(&log_buf, 0) });
             return EbpfError.ProgramLoadFailed;
         }
         const prog = BpfProgram{ .fd = @intCast(fd), .prog_type = prog_type, .name = name };
@@ -135,14 +136,13 @@ pub const EbpfRegistry = struct {
     }
 
     pub fn createMap(self: *EbpfRegistry, map_type: MapType, key_size: u32, value_size: u32, max_entries: u32, name: []const u8) !BpfMap {
-        const attr = std.os.linux.bpf_attr{
-            .map_type = @intFromEnum(map_type),
-            .key_size = key_size,
-            .value_size = value_size,
-            .max_entries = max_entries,
-            .map_name = undefined,
-        };
-        const fd = std.os.linux.bpf(.map_create, &attr, @sizeOf(std.os.linux.bpf_attr));
+        var attr = std.mem.zeroes(bpf_ns.MapCreateAttr);
+        attr.map_type = @intFromEnum(map_type);
+        attr.key_size = key_size;
+        attr.value_size = value_size;
+        attr.max_entries = max_entries;
+
+        const fd = linux.bpf(.map_create, &attr, @sizeOf(bpf_ns.MapCreateAttr));
         if (fd < 0) return EbpfError.MapCreationFailed;
         const map = BpfMap{
             .fd = @intCast(fd),
@@ -161,14 +161,12 @@ pub const EbpfRegistry = struct {
         return entry.?.fd;
     }
 
-    pub fn attachLsm(self: *EbpfRegistry, prog: *BpfProgram, hook_name: []const u8) !void {
-        _ = self;
+    pub fn attachLsm(_: *EbpfRegistry, prog: *BpfProgram, hook_name: []const u8) !void {
         _ = prog;
         std.log.info("LSM attached: {s}", .{hook_name});
     }
 
-    pub fn attachTracepoint(self: *EbpfRegistry, prog: *BpfProgram, category: []const u8, event: []const u8) !void {
-        _ = self;
+    pub fn attachTracepoint(_: *EbpfRegistry, prog: *BpfProgram, category: []const u8, event: []const u8) !void {
         _ = prog;
         std.log.info("Tracepoint: {s}/{s}", .{ category, event });
     }
@@ -183,6 +181,6 @@ pub const EbpfRegistry = struct {
         const lc = try std.fs.cwd().readFileAlloc(self.gpa, ebpf_lsm_policy_path, 1024 * 1024);
         defer self.gpa.free(lc);
         _ = try self.loadProgram(lc, .lsm, "lsm_policy");
-        std.log.info("eBPF: all 3 loaded", .{});
+        std.log.info("eBPF: all 3 embedded programs loaded", .{});
     }
 };

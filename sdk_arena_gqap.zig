@@ -354,3 +354,14 @@ pub fn incrementGeneration() void {
 pub fn currentGeneration() u64 {
     return g_current_generation.load(.acquire);
 }
+
+/// Sanitize one block from the quarantine pool (called by sanitizer thread).
+/// Returns true if a block was sanitized, false if quarantine was empty.
+pub fn sanitizeOne(current_gen: u64) bool {
+    const block = g_quarantine_pool.popSafe(current_gen) orelse return false;
+    avx2ZeroBlock(block.memory, block.capacity);
+    block.flags = .{ .zeroed = true, .quarantined = false };
+    g_l2_pool.push(block);
+    _ = g_total_sanitized.fetchAdd(1, .monotonic);
+    return true;
+}
