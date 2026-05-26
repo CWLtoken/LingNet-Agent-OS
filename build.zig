@@ -28,6 +28,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     switch_mod.addImport("arena-gqap", gqap_mod);
+    // NOTE: perfect_hash.zig (CHD) kept as reference, not linked into main build
+    // switch_mod.addImport("perfect_hash", perfect_hash_mod);
 
     const iouring_mod = b.createModule(.{
         .root_source_file = b.path("src/io_uring_route.zig"),
