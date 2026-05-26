@@ -69,12 +69,15 @@ pub const L2SkillLoader = struct {
     allocator: std.mem.Allocator,
     skills: std.ArrayListAligned(L2Skill, null),
     trusted_key: ed25519.PublicKey,
+    // N3 FIX: When false (default), Ed25519 verify failure rejects skill load
+    allow_unsafe_fallback: bool = false,
 
     pub fn init(allocator: std.mem.Allocator, trusted_key: ed25519.PublicKey) L2SkillLoader {
         return .{
             .allocator = allocator,
             .skills = std.ArrayListAligned(L2Skill, null).empty,
             .trusted_key = trusted_key,
+            .allow_unsafe_fallback = false,
         };
     }
 
@@ -118,12 +121,17 @@ pub const L2SkillLoader = struct {
         var public_key: ed25519.PublicKey = undefined;
         @memcpy(&public_key, key_data);
 
-        // P0-6 FIX: In fallback mode, verify returns error — log and continue
-        // In production with libsodium, this would be a hard failure
-        if (ed25519.verify(payload, signature, &public_key)) |_| {
-            std.log.info("[L2Loader] Signature verified (real Ed25519)", .{});
-        } else |_| {
-            std.log.warn("[L2Loader] Ed25519 verify failed in fallback mode — skipping in dev mode", .{});
+        // P0-6 FIX: In fallback mode, verify returns error — hard failure by default
+        // N3: Verification failure must return error, not silently continue
+        if (!self.allow_unsafe_fallback) {
+            if (ed25519.verify(payload, signature, &public_key)) |_| {
+                // verified OK
+            } else |_| {
+                std.log.err("[L2Loader] Ed25519 verify failed — rejecting skill", .{});
+                return error.SignatureVerificationFailed;
+            }
+        } else {
+            std.log.warn("[L2Loader] UNSAFE FALLBACK MODE — skipping Ed25519 verification", .{});
         }
 
         // Step 2: Create UntrustedArena
@@ -349,6 +357,7 @@ test "L2SkillLoader init/deinit" {
     ensureL2PoolsInit();
     const kp = ed25519.generateKeyPair();
     var loader = L2SkillLoader.init(std.testing.allocator, kp.public);
+    loader.allow_unsafe_fallback = true; // N3: test mode skip verify
     defer loader.deinit();
     try std.testing.expectEqual(@as(usize, 0), loader.skills.items.len);
 }
@@ -357,6 +366,7 @@ test "L2SkillLoader load from memory" {
     ensureL2PoolsInit();
     const kp = ed25519.generateKeyPair();
     var loader = L2SkillLoader.init(std.testing.allocator, kp.public);
+    loader.allow_unsafe_fallback = true; // N3: test mode skip verify
     defer loader.deinit();
 
     const payload = &[_]u8{ 0x90, 0x90, 0xC3, 0xC3, 0xC3 };
@@ -393,6 +403,7 @@ test "L2SkillLoader unload" {
     ensureL2PoolsInit();
     const kp = ed25519.generateKeyPair();
     var loader = L2SkillLoader.init(std.testing.allocator, kp.public);
+    loader.allow_unsafe_fallback = true; // N3: test mode skip verify
     defer loader.deinit();
 
     const payload = &[_]u8{ 0x90, 0x90, 0xC3 };
@@ -411,6 +422,7 @@ test "L2SkillLoader list skills" {
     ensureL2PoolsInit();
     const kp = ed25519.generateKeyPair();
     var loader = L2SkillLoader.init(std.testing.allocator, kp.public);
+    loader.allow_unsafe_fallback = true; // N3: test mode skip verify
     defer loader.deinit();
 
     const payload = &[_]u8{ 0x90, 0x90, 0xC3 };

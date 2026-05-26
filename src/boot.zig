@@ -60,9 +60,9 @@ fn sanitizerThreadFn(ctx: SanitizerThreadCtx) void {
             continue;
         }
 
-        std.posix.nanosleep(&.{
-            .tv_sec = 0,
-            .tv_nsec = ctx.wake_interval_ms * 1_000_000,
+        std.os.linux.nanosleep(&.{
+            .sec = 0,
+            .nsec = ctx.wake_interval_ms * 1_000_000,
         }, null) catch {};
     }
 }

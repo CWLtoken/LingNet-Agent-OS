@@ -56,8 +56,9 @@ pub const SwitchTable = struct {
     config: SwitchConfig,
     l0_routes: []RouteEntry,
     l0_count: usize,
-    l1_routes: std.ArrayListAligned(RouteEntry, null),
-    l2_routes: std.ArrayListAligned(RouteEntry, null),
+    // N4 FIX: Use HashMap for O(1) lookup instead of O(n) linear scan
+    l1_map: std.AutoHashMap(u32, RouteEntry),
+    l2_map: std.AutoHashMap(u32, RouteEntry),
     ring: ?*anyopaque = null,
 
     pub fn init(allocator: std.mem.Allocator, config: SwitchConfig) !SwitchTable {
@@ -69,8 +70,9 @@ pub const SwitchTable = struct {
             .config = config,
             .l0_routes = l0,
             .l0_count = 0,
-            .l1_routes = std.ArrayListAligned(RouteEntry, null).empty,
-            .l2_routes = std.ArrayListAligned(RouteEntry, null).empty,
+            // N4 FIX: HashMap for O(1) lookup
+            .l1_map = std.AutoHashMap(u32, RouteEntry).init(allocator),
+            .l2_map = std.AutoHashMap(u32, RouteEntry).init(allocator),
         };
     }
 
@@ -79,16 +81,8 @@ pub const SwitchTable = struct {
             entry.deinit();
         }
         self.allocator.free(self.l0_routes);
-
-        for (self.l1_routes.items) |*entry| {
-            entry.deinit();
-        }
-        self.l1_routes.deinit(self.allocator);
-
-        for (self.l2_routes.items) |*entry| {
-            entry.deinit();
-        }
-        self.l2_routes.deinit(self.allocator);
+        self.l1_map.deinit();
+        self.l2_map.deinit();
     }
 
     pub fn registerL0(self: *SwitchTable, intent_id: u32, handler: *const fn (ctx: *anyopaque) callconv(.c) void) !void {
@@ -99,23 +93,29 @@ pub const SwitchTable = struct {
 
     pub fn registerL1(self: *SwitchTable, intent_id: u32, handler: *const fn (ctx: *anyopaque) callconv(.c) void) !void {
         const entry = try RouteEntry.init(intent_id, .l1, handler);
-        try self.l1_routes.append(self.allocator, entry);
+        // N4 FIX: HashMap insert instead of ArrayList append
+        try self.l1_map.put(intent_id, entry);
     }
 
     pub fn registerL2(self: *SwitchTable, intent_id: u32, handler: *const fn (ctx: *anyopaque) callconv(.c) void) !void {
         const entry = try RouteEntry.init(intent_id, .l2, handler);
-        try self.l2_routes.append(self.allocator, entry);
+        // N4 FIX: HashMap insert instead of ArrayList append
+        try self.l2_map.put(intent_id, entry);
     }
 
+    // N4 FIX: O(1) HashMap lookup instead of O(n) linear scan
     pub fn lookup(self: *SwitchTable, intent_id: u32) ?*RouteEntry {
-        for (self.l0_routes[0..self.l0_count]) |*entry| {
-            if (entry.intent_id == intent_id) return entry;
+        // L0: Direct index (< 1ns)
+        if (intent_id < self.l0_count) {
+            return &self.l0_routes[intent_id];
         }
-        for (self.l1_routes.items) |*entry| {
-            if (entry.intent_id == intent_id) return entry;
+        // L1: HashMap O(1)
+        if (self.l1_map.getPtr(intent_id)) |entry| {
+            return entry;
         }
-        for (self.l2_routes.items) |*entry| {
-            if (entry.intent_id == intent_id) return entry;
+        // L2: HashMap O(1)
+        if (self.l2_map.getPtr(intent_id)) |entry| {
+            return entry;
         }
         return null;
     }
@@ -123,8 +123,8 @@ pub const SwitchTable = struct {
     pub fn stats(self: *SwitchTable) Stats {
         return .{
             .l0_count = self.l0_count,
-            .l1_count = self.l1_routes.items.len,
-            .l2_count = self.l2_routes.items.len,
+            .l1_count = self.l1_map.count(),
+            .l2_count = self.l2_map.count(),
         };
     }
 

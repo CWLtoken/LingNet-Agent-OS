@@ -295,7 +295,7 @@ pub fn sanitizerThreadLoop(config: SanitizerConfig) void {
         }
 
         if (processed == 0) {
-            _ = std.os.linux.nanosleep(&.{ .tv_sec = 0, .tv_nsec = @intCast(config.wake_interval_ms * 1_000_000) }, null);
+            _ = std.os.linux.nanosleep(&.{ .sec = 0, .nsec = @intCast(config.wake_interval_ms * 1_000_000) }, null);
         }
     }
 }
