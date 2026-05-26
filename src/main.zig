@@ -48,7 +48,8 @@ pub fn main(init: std.process.Init) !void {
         .action = .forward,
         .destination = 0,
         .flags = .{ .enabled = true, .sticky = true },
-        .hit_count = 0,
+        // P0-3 FIX: hit_count is now std.atomic.Value(u64)
+        .hit_count = .{ .raw = 0 },
     });
 
     var flow_buckets: [4096]mrc.MrcFlowTable.FlowBucket = undefined;
@@ -127,7 +128,8 @@ test "MrcCamTable basic lookup" {
         .action = .forward,
         .destination = 1,
         .flags = .{ .enabled = true },
-        .hit_count = 0,
+        // P0-3 FIX: hit_count is now std.atomic.Value(u64)
+        .hit_count = .{ .raw = 0 },
     });
 
     var pkt = mrc.MrcPacket{};
@@ -148,7 +150,8 @@ test "MrcFlow timeout detection" {
         .id = 1,
         .packet = .{},
         .action = .forward,
-        .hit_count = 0,
+        // P0-3 FIX: hit_count is now std.atomic.Value(u64)
+        .hit_count = .{ .raw = 0 },
         .last_seen_ns = 1000,
         .timeout_ns = 500,
         .state = .established,

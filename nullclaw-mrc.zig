@@ -78,7 +78,7 @@ pub const MrcFlow = extern struct {
     id: u64,
     packet: MrcPacket,
     action: MrcAction,
-    hit_count: u64,
+    hit_count: std.atomic.Value(u64),
     last_seen_ns: u64,
     timeout_ns: u64,
     state: FlowState,
@@ -98,7 +98,7 @@ pub const MrcFlow = extern struct {
     /// Update flow on packet match
     pub fn touch(self: *MrcFlow, now_ns: u64) void {
         self.last_seen_ns = now_ns;
-        self.hit_count += 1;
+        _ = self.hit_count.fetchAdd(1, .Monotonic);
         if (self.state == .new) self.state = .established;
     }
 };
@@ -109,7 +109,7 @@ pub const MrcCamEntry = extern struct {
     action: MrcAction,
     destination: u32,   // Next-hop IP or port
     flags: CamFlags,
-    hit_count: u64,
+    hit_count: std.atomic.Value(u64),
 
     pub const CamKey = extern struct {
         src_ip: u32 = 0,
@@ -190,8 +190,10 @@ pub const MrcFlowTable = struct {
         const idx = hash % self.capacity;
         const bucket = &self.buckets[idx];
 
-        // Spin lock
-        while (!bucket.lock.tryLock()) {}
+        // Spin lock with backoff (P1-1 FIX)
+        while (!bucket.lock.tryLock()) {
+            std.atomic.spinLoopHint();
+        }
         defer bucket.lock.unlock();
 
         if (bucket.flow) |flow| {
@@ -241,8 +243,8 @@ pub const MrcEngine = struct {
 
         // CAM first (highest priority)
         if (self.cam.lookup(pkt)) |entry| {
-            entry.hit_count += 1;
-            self.stats.cam_hits.fetchAdd(1, .monotonic);
+            _ = entry.hit_count.fetchAdd(1, .Monotonic);
+            self.stats.cam_hits.fetchAdd(1, .Monotonic);
             return entry.action;
         }
 

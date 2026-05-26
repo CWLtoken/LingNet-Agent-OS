@@ -189,3 +189,8 @@ test "benchTrustedArena smoke" {
     }
     try std.testing.expect(hist.count == 10);
 }
+
+/// Entry point for standalone benchmark execution
+pub fn main() !void {
+    std.log.info("[bench_perf] Use 'zig build bench' for GQAP benchmarks", .{});
+}

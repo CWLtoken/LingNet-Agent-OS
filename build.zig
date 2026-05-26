@@ -219,34 +219,26 @@ pub fn build(b: *std.Build) void {
     main_mod.addImport("e2e-test", e2e_mod);
 
     // === V2.6 eBPF Compilation Pipeline ===
-    // Note: In production, these would be proper build steps with dependencies
+    // P0-4 FIX: Use addSystemCommand returning *Step.Run, then dependOn for ordering
     const bpf_target_triple = "bpfel-unknown-none";
 
-    _ = b.addSystemCommand(&[_][]const u8{
+    const clang_lsm = b.addSystemCommand(&[_][]const u8{
         "clang", "-target", bpf_target_triple, "-O2", "-g",
-        "-I", "/usr/include/x86_64-linux-gnu",
-        "-I", "/usr/include",
+        "-I", ".", "-I", "/usr/include/x86_64-linux-gnu", "-I", "/usr/include",
         "-D__TARGET_ARCH_x86",
-        "-c", "ebpf_lsm_policy.bpf.c",
-        "-o", "ebpf_lsm_policy.o",
+        "-c", "ebpf_lsm_policy.bpf.c", "-o", "ebpf_lsm_policy.o",
     });
-
-    _ = b.addSystemCommand(&[_][]const u8{
+    const clang_monitor = b.addSystemCommand(&[_][]const u8{
         "clang", "-target", bpf_target_triple, "-O2", "-g",
-        "-I", "/usr/include/x86_64-linux-gnu",
-        "-I", "/usr/include",
+        "-I", ".", "-I", "/usr/include/x86_64-linux-gnu", "-I", "/usr/include",
         "-D__TARGET_ARCH_x86",
-        "-c", "ebpf_runtime_monitor.bpf.c",
-        "-o", "ebpf_runtime_monitor.o",
+        "-c", "ebpf_runtime_monitor.bpf.c", "-o", "ebpf_runtime_monitor.o",
     });
-
-    _ = b.addSystemCommand(&[_][]const u8{
+    const clang_audit = b.addSystemCommand(&[_][]const u8{
         "clang", "-target", bpf_target_triple, "-O2", "-g",
-        "-I", "/usr/include/x86_64-linux-gnu",
-        "-I", "/usr/include",
+        "-I", ".", "-I", "/usr/include/x86_64-linux-gnu", "-I", "/usr/include",
         "-D__TARGET_ARCH_x86",
-        "-c", "ebpf_arena_audit.bpf.c",
-        "-o", "ebpf_arena_audit.o",
+        "-c", "ebpf_arena_audit.bpf.c", "-o", "ebpf_arena_audit.o",
     });
 
     // Embed BPF ELF objects via @embedFile in boot.zig
@@ -255,6 +247,10 @@ pub fn build(b: *std.Build) void {
         .name = "lingnet-daemon",
         .root_module = main_mod,
     });
+    // P0-4 FIX: Ensure BPF .o files are compiled before the main executable
+    exe.step.dependOn(&clang_lsm.step);
+    exe.step.dependOn(&clang_monitor.step);
+    exe.step.dependOn(&clang_audit.step);
     b.installArtifact(exe);
 
     // === Benchmark Executable ===

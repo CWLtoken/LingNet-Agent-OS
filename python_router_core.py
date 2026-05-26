@@ -11,6 +11,7 @@ Performance Target: Race mode first response < 2s, Smart routing P99 < 3s
 """
 
 import logging
+import threading
 
 logger = logging.getLogger(__name__)
 import asyncio
@@ -93,10 +94,16 @@ class CostTracker:
         self.hourly_budget = hourly_budget
         self.hourly_spent = 0.0
         self.hour_start = time.time()
-        self.lock = asyncio.Lock()
+        # P0-7 FIX: threading.Lock for thread safety (asyncio.Lock only protects against coroutine interleaving)
+        self._lock = threading.Lock()
 
     async def charge(self, cost: float) -> bool:
-        async with self.lock:
+        # P0-7 FIX: Use threading.Lock for thread safety
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._charge_sync, cost)
+
+    def _charge_sync(self, cost: float) -> bool:
+        with self._lock:
             # Reset hour if needed
             if time.time() - self.hour_start > 3600:
                 self.hour_start = time.time()

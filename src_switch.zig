@@ -31,12 +31,14 @@ pub const SwitchEngine = struct {
     // The actual table swap uses a mutex; readers check generation before dereferencing.
     l1_table_ptr: ?*const RouteEntry,
     l1_table_len: usize,
-    l1_table_mutex: std.Thread.Mutex,
+    // P0-5 FIX: std.Thread.Mutex/RwLock don't exist in Zig 0.17
+    // Use std.atomic.Mutex instead
+    l1_table_mutex: std.atomic.Mutex,
     l1_generation: std.atomic.Value(u64),
 
     // L2: F14HashMap (~50ns)
     l2_map: std.StringHashMap(RouteEntry),
-    l2_lock: std.Thread.RwLock,
+    l2_lock: std.atomic.Mutex,
 
     // Global generation counter (shared with GQAP)
     current_generation: *std.atomic.Value(u64),
@@ -47,10 +49,10 @@ pub const SwitchEngine = struct {
             .l0_table = l0_entries,
             .l1_table_ptr = if (l1_entries.len > 0) &l1_entries[0] else null,
             .l1_table_len = l1_entries.len,
-            .l1_table_mutex = .{},
+            .l1_table_mutex = .unlocked,
             .l1_generation = .{ .raw = 1 },
             .l2_map = std.StringHashMap(RouteEntry).init(allocator),
-            .l2_lock = .{},
+            .l2_lock = .unlocked,
             .current_generation = &gqap.g_current_generation,
         };
     }
@@ -86,9 +88,10 @@ pub const SwitchEngine = struct {
             }
         }
 
-        // L2: F14HashMap with read lock (~50ns)
-        self.l2_lock.lockShared();
-        defer self.l2_lock.unlockShared();
+        // L2: F14HashMap with lock (~50ns)
+        // P0-5 FIX: std.atomic.Mutex has no lockShared/unlockShared
+        while (!self.l2_lock.tryLock()) {}
+        defer self.l2_lock.unlock();
 
         if (self.l2_map.get(packet.intent)) |*entry| {
             entry.stats.hits.fetchAdd(1, .monotonic);
@@ -101,7 +104,8 @@ pub const SwitchEngine = struct {
     }
 
     pub fn getL1Table(self: *const SwitchEngine) []const RouteEntry {
-        self.l1_table_mutex.lock();
+        // P0-5 FIX: std.atomic.Mutex has no .lock(), use tryLock spin
+        while (!self.l1_table_mutex.tryLock()) {}
         defer self.l1_table_mutex.unlock();
         if (self.l1_table_ptr) |ptr| {
             return ptr[0..self.l1_table_len];
@@ -114,8 +118,8 @@ pub const SwitchEngine = struct {
         // Increment generation to quarantine old packets
         const new_gen = self.current_generation.fetchAdd(1, .acq_rel) + 1;
 
-        // Mutex-protected pointer swap (fat pointer cannot be atomic)
-        self.l1_table_mutex.lock();
+        // P0-5 FIX: std.atomic.Mutex has no .lock(), use tryLock spin
+        while (!self.l1_table_mutex.tryLock()) {}
         self.l1_table_ptr = new_table_ptr;
         self.l1_table_len = new_table_len;
         self.l1_table_mutex.unlock();

@@ -198,6 +198,12 @@ pub fn Arena(comptime tier: SecurityTier) type {
                         b.flags.dirty = true;
                         break :blk b;
                     }
+                    // P1-2 FIX: If pools exhausted, try quarantine pool directly
+                    // This prevents OOM when sanitizer thread is slow
+                    if (g_quarantine_pool.popSafe(gen)) |b| {
+                        b.flags = .{ .zeroed = true, .quarantined = false };
+                        break :blk b;
+                    }
                     break :blk null;
                 },
             };
@@ -319,6 +325,12 @@ inline fn avx2ZeroBlock(ptr: [*]u8, len: usize) void {
                 : .{ .memory = true }
             );
         }
+        // P0-2 FIX: sfence after non-temporal stores to ensure DMA coherency
+        asm volatile ("sfence"
+            :
+            :
+            : "memory"
+        );
     }
 
     // Scalar fallback for tail or non-AVX2
