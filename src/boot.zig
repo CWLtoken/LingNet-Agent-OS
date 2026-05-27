@@ -9,10 +9,8 @@ const std = @import("std");
 const gqap = @import("arena-gqap");
 const linux = std.os.linux;
 
-// Embedded eBPF ELF objects (compiled by build.zig clang pipeline)
-const lsm_bpf = @embedFile("ebpf_lsm_policy.o");
-const monitor_bpf = @embedFile("ebpf_runtime_monitor.o");
-const arena_audit_bpf = @embedFile("ebpf_arena_audit.o");
+// V2.8: eBPF programs are embedded as Zig inline bytecode in tools_ebpf_loader.zig
+// No external .o files needed — loadAllEmbedded() uses compile-time BPF instruction arrays
 
 pub const BootConfig = struct {
     min_kernel_major: u32 = 5,
@@ -47,10 +45,9 @@ const SanitizerThreadCtx = struct {
 
 /// Real sanitizer thread entry point (H2 FIX)
 fn sanitizerThreadFn(ctx: SanitizerThreadCtx) void {
-    var cpu_set: linux.cpu_set_t = undefined;
-    linux.CPU_ZERO(&cpu_set);
-    linux.CPU_SET(ctx.target_cpu, &cpu_set);
-    _ = linux.sched_setaffinity(0, @sizeOf(linux.cpu_set_t), &cpu_set);
+    var cpu_set: linux.cpu_set_t = @as(linux.cpu_set_t, @splat(0));
+    cpu_set[@as(usize, @intCast(ctx.target_cpu)) / @bitSizeOf(usize)] |= @as(usize, 1) << @as(u6, @intCast(ctx.target_cpu % @bitSizeOf(usize)));
+    _ = linux.sched_setaffinity(0, &cpu_set) catch {};
 
     std.log.info("[sanitizer] Thread bound to core {d}", .{ctx.target_cpu});
 
@@ -60,10 +57,10 @@ fn sanitizerThreadFn(ctx: SanitizerThreadCtx) void {
             continue;
         }
 
-        std.os.linux.nanosleep(&.{
+        _ = std.os.linux.nanosleep(&.{
             .sec = 0,
-            .nsec = ctx.wake_interval_ms * 1_000_000,
-        }, null) catch {};
+            .nsec = @as(isize, @intCast(ctx.wake_interval_ms * 1_000_000)),
+        }, null);
     }
 }
 
@@ -248,32 +245,16 @@ pub fn bootCheck(config: BootConfig) !BootResult {
     return result;
 }
 
-/// Load all eBPF programs (F2 FIX)
-fn loadEbpfPrograms(result: *BootResult) !bool {
+/// Load all eBPF programs (V2.8: standard Zig inline bytecode)
+fn loadEbpfPrograms(_: *BootResult) !bool {
     const ebpf = @import("ebpf-loader");
 
     var reg = ebpf.EbpfRegistry.init(std.heap.page_allocator);
     defer reg.deinit();
 
-    result.ebpf_lsm_fd = try loadSingleBpf(&reg, lsm_bpf, ebpf.ProgType.lsm, "lsm_policy");
-    std.log.info("[boot] LSM policy loaded, fd={d}", .{result.ebpf_lsm_fd});
-
-    result.ebpf_monitor_fd = try loadSingleBpf(&reg, monitor_bpf, ebpf.ProgType.tracepoint, "runtime_monitor");
-    std.log.info("[boot] Runtime monitor loaded, fd={d}", .{result.ebpf_monitor_fd});
-
-    result.ebpf_audit_fd = try loadSingleBpf(&reg, arena_audit_bpf, ebpf.ProgType.kprobe, "arena_audit");
-    std.log.info("[boot] Arena audit loaded, fd={d}", .{result.ebpf_audit_fd});
-
+    try reg.loadAllEmbedded();
+    std.log.info("[boot] eBPF programs loaded via Zig inline bytecode", .{});
     return true;
-}
-
-fn loadSingleBpf(reg: anytype, bytecode: []const u8, prog_type: anytype, name: []const u8) !i32 {
-    const prog = try reg.loadProgram(bytecode, prog_type, name);
-    if (!prog.loaded) {
-        std.log.err("[boot] Failed to load BPF '{s}': error_code={d}", .{ name, prog.error_code });
-        return error.BpfLoadFailed;
-    }
-    return prog.fd;
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────

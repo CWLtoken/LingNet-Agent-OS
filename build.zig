@@ -121,6 +121,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     boot_mod.addImport("arena-gqap", gqap_mod);
+    boot_mod.addImport("ebpf-loader", ebpf_mod);
 
     // === V1 Compat Module ===
     const v1compat_mod = b.createModule(.{
@@ -220,39 +221,13 @@ pub fn build(b: *std.Build) void {
     e2e_mod.addImport("arena-gqap", gqap_mod);
     main_mod.addImport("e2e-test", e2e_mod);
 
-    // === V2.6 eBPF Compilation Pipeline ===
-    // P0-4 FIX: Use addSystemCommand returning *Step.Run, then dependOn for ordering
-    const bpf_target_triple = "bpfel-unknown-none";
-
-    const clang_lsm = b.addSystemCommand(&[_][]const u8{
-        "clang", "-target", bpf_target_triple, "-O2", "-g",
-        "-I", ".", "-I", "/usr/include/x86_64-linux-gnu", "-I", "/usr/include",
-        "-D__TARGET_ARCH_x86",
-        "-c", "ebpf_lsm_policy.bpf.c", "-o", "ebpf_lsm_policy.o",
-    });
-    const clang_monitor = b.addSystemCommand(&[_][]const u8{
-        "clang", "-target", bpf_target_triple, "-O2", "-g",
-        "-I", ".", "-I", "/usr/include/x86_64-linux-gnu", "-I", "/usr/include",
-        "-D__TARGET_ARCH_x86",
-        "-c", "ebpf_runtime_monitor.bpf.c", "-o", "ebpf_runtime_monitor.o",
-    });
-    const clang_audit = b.addSystemCommand(&[_][]const u8{
-        "clang", "-target", bpf_target_triple, "-O2", "-g",
-        "-I", ".", "-I", "/usr/include/x86_64-linux-gnu", "-I", "/usr/include",
-        "-D__TARGET_ARCH_x86",
-        "-c", "ebpf_arena_audit.bpf.c", "-o", "ebpf_arena_audit.o",
-    });
-
-    // Embed BPF ELF objects via @embedFile in boot.zig
+    // === V2.8 eBPF: Standard Zig inline bytecode (no clang/.o needed) ===
+    // BPF programs are embedded as compile-time Zig arrays in tools_ebpf_loader.zig
 
     const exe = b.addExecutable(.{
         .name = "lingnet-daemon",
         .root_module = main_mod,
     });
-    // P0-4 FIX: Ensure BPF .o files are compiled before the main executable
-    exe.step.dependOn(&clang_lsm.step);
-    exe.step.dependOn(&clang_monitor.step);
-    exe.step.dependOn(&clang_audit.step);
     b.installArtifact(exe);
 
     // === Benchmark Executable ===

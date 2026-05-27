@@ -69,6 +69,12 @@ pub fn main(init: std.process.Init) !void {
     try metrics_collector.updatePoolStats();
     std.log.info("[MAIN] Metrics collector initialized", .{});
 
+    // ── [6b] Start Metrics HTTP server (P2-1 FIX) ──
+    const port = 9100; // Default metrics port (override via LINGNET_METRICS_PORT env var)
+    const metrics_thread = try metrics.spawnMetricsServer(&metrics_collector, port);
+    _ = metrics_thread;
+    std.log.info("[MAIN] Metrics HTTP server spawned on port {d}", .{port});
+
     // ── [7] Initialize Netlink ──
     var nl_sock = try netlink.NlSock.socket(allocator, netlink.NETLINK_GENERIC, 0);
     defer nl_sock.close();

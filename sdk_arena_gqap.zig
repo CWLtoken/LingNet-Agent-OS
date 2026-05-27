@@ -304,38 +304,20 @@ pub fn sanitizerThreadLoop(config: SanitizerConfig) void {
 // Note: Zig 0.17 asm syntax changed - no separate clobber section.
 // Memory clobber expressed via "+m" output constraint on dummy var.
 inline fn avx2ZeroBlock(ptr: [*]u8, len: usize) void {
-    const block_len = std.mem.alignForward(usize, len, 32);
-    var i: usize = 0;
-
-    if (builtin.cpu.arch == .x86_64 and comptime std.Target.x86.featureSetHas(builtin.cpu.features, .avx2)) {
-        while (i + 256 <= block_len) : (i += 256) {
-            asm volatile (
-                \\ vpxor %%ymm0, %%ymm0, %%ymm0
-                \\ vmovntdq %%ymm0, 0(%[p])
-                \\ vmovntdq %%ymm0, 32(%[p])
-                \\ vmovntdq %%ymm0, 64(%[p])
-                \\ vmovntdq %%ymm0, 96(%[p])
-                \\ vmovntdq %%ymm0, 128(%[p])
-                \\ vmovntdq %%ymm0, 160(%[p])
-                \\ vmovntdq %%ymm0, 192(%[p])
-                \\ vmovntdq %%ymm0, 224(%[p])
-                :
-                : [p] "r" (ptr + i),
-                  [mem] "m" (@as([*]volatile u8, ptr)),
-                : .{ .memory = true }
-            );
-        }
-        // P0-2 FIX: sfence after non-temporal stores to ensure DMA coherency
-        asm volatile ("sfence"
-            :
-            :
-            : "memory"
-        );
-    }
-
-    // Scalar fallback for tail or non-AVX2
-    @memset(ptr[i..block_len], 0);
+    // V2.8: AVX2 asm disabled — Zig 0.17 asm syntax changed (Intel/AT&T mnemonic issues)
+    // Fallback to memset which the compiler can optimize
+    @memset(ptr[0..len], 0);
 }
+
+// Original AVX2 version (disabled for Zig 0.17 compatibility):
+// inline fn avx2ZeroBlock(ptr: [*]u8, len: usize) void {
+//     const block_len = std.mem.alignForward(usize, len, 32);
+//     var i: usize = 0;
+//     ...
+// }
+
+
+
 
 // Tier 0 Boot Security Validation (integrates with V2.2 boot sequence)
 pub fn bootSecurityValidation() !void {

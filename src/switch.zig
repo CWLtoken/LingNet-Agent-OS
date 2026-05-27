@@ -11,8 +11,7 @@ var g_switch_pools_init = false;
 fn ensureSwitchPoolsInit() void {
     if (!g_switch_pools_init) {
         g_switch_pools_init = true;
-        gqap.poolTrusted = gqap.GqapPool.init();
-        gqap.poolUntrusted = gqap.GqapPool.init();
+        // Pools initialized via gqap.initPools() in main; tests use page_allocator directly
     }
 }
 
